@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Avatar, KindBadge, AsyncButton, fmtCount } from '../components.jsx';
 
-const BLANK = { name: '', handle: '', bio: '', persona: '', kind: 'custom', followers: '' };
+const BLANK = { name: '', real_name: '', handle: '', bio: '', persona: '', kind: 'custom', followers: '' };
 const KIND_LABEL = { all: 'All', player: 'You play', custom: 'Your characters', generated: 'AI generated' };
 
 /** Reads a dropped file as text (server extracts .docx/.pdf). */
@@ -110,6 +110,7 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="name clickable" onClick={() => openProfile(c.id)}>{c.name}</div>
                   <div className="muted small">@{c.handle} · {fmtCount(c.followerCount)} followers</div>
+                  {c.real_name && c.real_name !== c.name && <div className="muted small ellipsis">{c.real_name}</div>}
                 </div>
                 {c.kind !== 'player' && (
                   <label className="switch" title="Active on this world">
@@ -155,9 +156,12 @@ function CharacterEditor({ worldId, initial, notify, onClose, onSaved }) {
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <h2>{isNew ? 'New character' : `Edit ${initial.name}`}</h2>
         <div className="grid2">
-          <label>Name<input value={c.name} onChange={set('name')} autoFocus /></label>
-          <label>Handle<input value={c.handle} onChange={set('handle')} placeholder="auto from name" /></label>
+          <label>Display name (username)<input value={c.name} onChange={set('name')} autoFocus placeholder="What shows on their profile" /></label>
+          <label>@handle<input value={c.handle} onChange={set('handle')} placeholder="auto from display name" /></label>
         </div>
+        <label>Real name <span className="muted">(optional — who they really are; helps the AI find their lore)</span>
+          <input value={c.real_name || ''} onChange={set('real_name')} placeholder="Leave empty if it's the same as the display name" />
+        </label>
         <label>Profile bio<input value={c.bio} onChange={set('bio')} placeholder="What their profile says" /></label>
         <label>Description
           <DropText value={c.persona} onChange={(v) => setC({ ...c, persona: v })} notify={notify} rows={12}
@@ -181,7 +185,7 @@ function CharacterEditor({ worldId, initial, notify, onClose, onSaved }) {
           <div className="row">
             <AsyncButton notify={notify} busyLabel="Drafting…" title="Expand a rough idea into a description" onClick={async () => {
               const d = await api.post(`/worlds/${worldId}/characters/draft`, { name: c.name, idea: [c.bio, c.persona].filter(Boolean).join('\n') });
-              setC({ ...c, name: c.name || d.name, handle: c.handle || d.handle, bio: c.bio || d.bio, persona: d.description || c.persona });
+              setC({ ...c, name: c.name || d.name, real_name: c.real_name || d.realName || '', handle: c.handle || d.handle, bio: c.bio || d.bio, persona: d.description || c.persona });
             }}>✨ Draft with AI</AsyncButton>
             {!isNew && (
               <AsyncButton className="danger" notify={notify} onClick={async () => {
@@ -240,7 +244,7 @@ function BulkImport({ worldId, notify, onClose, onDone }) {
                 <div key={i} className={`import-row ${c.skip ? 'inactive' : ''}`}>
                   <div className="row">
                     <input type="checkbox" checked={!c.skip} onChange={(e) => edit(i, 'skip', !e.target.checked)} />
-                    <input value={c.name} onChange={(e) => edit(i, 'name', e.target.value)} placeholder="Name" />
+                    <input value={c.name} onChange={(e) => edit(i, 'name', e.target.value)} placeholder="Display name" />
                     <input value={c.handle} onChange={(e) => edit(i, 'handle', e.target.value)} placeholder="handle" style={{ maxWidth: 160 }} />
                     <button className="link" onClick={() => setOpen(open === i ? null : i)}>{open === i ? 'hide' : 'description'}</button>
                   </div>

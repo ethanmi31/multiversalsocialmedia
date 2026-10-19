@@ -33,6 +33,7 @@ export default function Profile({ id, worldId, persona, chars, openProfile, open
           <div style={{ flex: 1 }}>
             <h2 style={{ margin: 0 }}>{c.name}</h2>
             <div className="muted">@{c.handle} {data.followsYou && <span className="badge">Follows you</span>}</div>
+            {c.real_name && c.real_name !== c.name && <div className="muted small">Real name: {c.real_name}</div>}
             <p><RichText text={c.bio} chars={chars} openProfile={openProfile} /></p>
             <div className="small"><b>{fmtCount(data.followers)}</b> <span className="muted">followers</span> · <b>{data.following}</b> <span className="muted">following</span></div>
           </div>

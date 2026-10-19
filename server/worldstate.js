@@ -17,11 +17,11 @@ export function resolver(worldId) {
   const map = new Map();
   for (const c of chars) {
     map.set(c.handle.toLowerCase(), c);
-    if (!map.has(c.name.toLowerCase())) map.set(c.name.toLowerCase(), c);
+    for (const n of [c.name, c.real_name]) if (n?.trim() && !map.has(n.trim().toLowerCase())) map.set(n.trim().toLowerCase(), c);
   }
   // Models often shorten handles (@kael for @kael_storm) or use first names: accept those when unambiguous.
   const loose = (key) => {
-    const hits = chars.filter((c) => c.handle.toLowerCase().startsWith(key) || c.name.toLowerCase().split(/\s+/)[0] === key);
+    const hits = chars.filter((c) => c.handle.toLowerCase().startsWith(key) || [c.name, c.real_name].some((n) => n?.toLowerCase().split(/\s+/)[0] === key));
     return hits.length === 1 ? hits[0] : null;
   };
   return (h) => {

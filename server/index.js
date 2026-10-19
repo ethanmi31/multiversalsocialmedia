@@ -230,7 +230,7 @@ api.delete('/memories/:id', (req, res) => {
 });
 
 // ---------------------------------------------------------------- characters
-const CHAR_FIELDS = ['kind', 'name', 'handle', 'bio', 'persona', 'style', 'color', 'active', 'followers'];
+const CHAR_FIELDS = ['kind', 'name', 'real_name', 'handle', 'bio', 'persona', 'style', 'color', 'active', 'followers'];
 
 api.get('/worlds/:id/characters', (req, res) => {
   res.json(
@@ -265,7 +265,7 @@ api.put('/characters/:id', (req, res) => {
     let v = req.body[f];
     if (f === 'active') v = v ? 1 : 0;
     else if (f === 'followers') v = Number(v) || 0;
-    else if (f === 'handle') v = uniqueHandle(c.world_id, v || req.body.name || c.name, c.id);
+    else if (f === 'handle') v = v ? uniqueHandle(c.world_id, v, c.id) : c.handle; // blank = keep the current handle
     else v = String(v ?? '');
     db.prepare(`UPDATE characters SET ${f} = ? WHERE id = ?`).run(v, c.id);
   }

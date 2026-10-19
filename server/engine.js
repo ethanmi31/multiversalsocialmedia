@@ -45,9 +45,15 @@ export function worldPreamble(world) {
 
 export const fmtFollowers = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : String(n));
 
+/** Who the character really is (for lore and continuity); `name` is just what their profile shows. */
+export const realName = (c) => c.real_name?.trim() || c.name;
+/** Every name the character can be recognized by. */
+export const knownNames = (c) => [...new Set([c.name, c.real_name].filter((n) => n?.trim()))];
+
 /** Character description as the AI sees it. `persona` holds the free-form description the user pasted. */
 export function characterCard(c, { brief = false } = {}) {
   let s = `${c.name} (@${c.handle})`;
+  if (c.real_name?.trim() && c.real_name.trim() !== c.name) s += ` — real name: ${c.real_name.trim()}`;
   if (c.bio) s += ` — bio: "${clip(c.bio, 200)}"`;
   if (c.kind !== 'player') s += ` · ${fmtFollowers(followerCount(c))} followers`;
   if (c.persona) s += `\n${clip(c.persona, brief ? 700 : 6000)}`;
@@ -65,12 +71,18 @@ export function uniqueHandle(worldId, wanted, exceptId = 0) {
 
 const defaultFollowers = () => Math.round(40 + Math.random() ** 3 * 8000);
 
+/** Seed for an auto-generated handle: the core of the display name, without tags like "| something" or "(something)". */
+function handleSeed(c) {
+  const core = String(c.name || '').split(/\s*[|(\[{·•,—–]\s*|\s+-\s+/)[0].trim();
+  return core && makeHandle(core) !== 'user' ? core : c.realName || c.real_name || c.name;
+}
+
 export function insertCharacter(worldId, c) {
-  const handle = uniqueHandle(worldId, c.handle || c.name);
+  const handle = uniqueHandle(worldId, c.handle || handleSeed(c));
   const followers = c.followers !== '' && c.followers != null && Number.isFinite(Number(c.followers)) ? Number(c.followers) : defaultFollowers();
   const r = db
-    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active, followers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(worldId, c.kind || 'custom', String(c.name).trim(), handle, c.bio || '', c.persona || c.description || '', c.style || '', c.color || colorFor(c.name), c.active === 0 || c.active === false ? 0 : 1, followers);
+    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active, followers, real_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(worldId, c.kind || 'custom', String(c.name).trim(), handle, c.bio || '', c.persona || c.description || '', c.style || '', c.color || colorFor(c.name), c.active === 0 || c.active === false ? 0 : 1, followers, String(c.realName ?? c.real_name ?? '').trim());
   return db.prepare('SELECT * FROM characters WHERE id = ?').get(r.lastInsertRowid);
 }
 
@@ -98,12 +110,20 @@ export function personaBlock(ps) {
 
 /** The author's own rules for what kind of random users this universe has. */
 const npcRules = (world) =>
-  world.npc_instructions?.trim() ? `THE AUTHOR'S INSTRUCTIONS FOR GENERATING USERS (follow these exactly, they override defaults):\n${world.npc_instructions.trim()}` : '';
+  world.npc_instructions?.trim()
+    ? `THE AUTHOR'S INSTRUCTIONS FOR GENERATING USERS (follow these exactly, they override the defaults). When the author says "username" or "name" they mean the display name ("name" field); only "handle" or "@" means the handle:\n${world.npc_instructions.trim()}`
+    : '';
+
+/** What each field of a generated account means. Kept universe-neutral: formats come from the author's instructions. */
+const ACCOUNT_FIELDS = `Field meanings:
+- "name": the DISPLAY NAME shown on their profile — what people call their username. Like real people online it is usually a nickname, alias, joke or stylized name (lowercase, emoji and symbols are fine), NOT their full legal name. Only celebrities, officials, businesses and news accounts use their real name. Anything the author wants added to usernames goes here.
+- "handle": the @handle. Short (max 15 chars), lowercase letters, numbers and underscores only, no spaces. Keep it clean: nothing extra unless the author explicitly asks for it in the handle.
+- "realName": their actual full name (private; used for continuity, not shown on posts).`;
 
 export async function generateCharacters(worldId, { count = 5, theme = '' } = {}) {
   const world = getWorld(worldId);
   count = Math.max(1, Math.min(15, Number(count) || 5));
-  const existing = db.prepare('SELECT name FROM characters WHERE world_id = ?').all(worldId).map((c) => c.name);
+  const existing = db.prepare('SELECT name, real_name FROM characters WHERE world_id = ?').all(worldId).flatMap(knownNames);
   const titles = db
     .prepare('SELECT title FROM lore_entries WHERE world_id = ? AND enabled = 1 ORDER BY priority DESC LIMIT 120')
     .all(worldId)
@@ -118,7 +138,8 @@ export async function generateCharacters(worldId, { count = 5, theme = '' } = {}
       {
         role: 'system',
         content: `${worldPreamble(world)}\nYou invent believable social-media users who live in this universe: locals, fans, critics, officials, stans, trolls, rivals, news/gossip accounts. Each has a distinct voice and opinions rooted in the lore. Do not duplicate existing names.
-Return ONLY JSON: {"characters":[{"name":string,"handle":string,"bio":string (profile bio, <25 words),"description":string (personality, background, ties to the lore, how they type online; 50-120 words),"followers":number (realistic audience size)}]}`
+${ACCOUNT_FIELDS}
+Return ONLY JSON: {"characters":[{"name":string,"handle":string,"realName":string,"bio":string (profile bio, <25 words),"description":string (personality, background, ties to the lore, how they type online; 50-120 words),"followers":number (realistic audience size)}]}`
       },
       {
         role: 'user',
@@ -147,7 +168,7 @@ export async function draftCharacter(worldId, { name, idea }) {
     messages: [
       {
         role: 'system',
-        content: `${worldPreamble(world)}\nFlesh out a character for this universe, consistent with the lore. Return ONLY JSON: {"name":string,"handle":string,"bio":string (<25 words),"description":string (personality, background, relationships, how they type online; 80-180 words)}`
+        content: `${worldPreamble(world)}\nFlesh out a character for this universe, consistent with the lore.\n${ACCOUNT_FIELDS}\nReturn ONLY JSON: {"name":string,"handle":string,"realName":string,"bio":string (<25 words),"description":string (personality, background, relationships, how they type online; 80-180 words)}`
       },
       { role: 'user', content: `${lore.text ? `RELEVANT LORE:\n${lore.text}\n\n` : ''}Name: ${name || '(invent one)'}\nIdea: ${idea || '(surprise me)'}` }
     ]
@@ -282,10 +303,10 @@ export async function worldTick(worldId, { count = 5, topic = '', allowDm } = {}
   const { roots, replies } = recentFeed(worldId);
 
   const state = worldContext(worldId, { focus: actors, others: ps, memoriesPer: 3 });
-  const lore = activateLore(worldId, [topic, state, ...actors.map((a) => a.name), ...roots.slice(-6).map((p) => p.content)].join('\n'));
+  const lore = activateLore(worldId, [topic, state, ...actors.flatMap(knownNames), ...roots.slice(-6).map((p) => p.content)].join('\n'));
 
   const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null}],
-${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n' : ''}${newUserAllowed ? '"newUsers":[{"name":string,"handle":string,"bio":string,"description":string,"followers":number}],\n' : ''}"follows":[{"from":handle,"to":handle}],"unfollows":[{"from":handle,"to":handle}],
+${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n' : ''}${newUserAllowed ? '"newUsers":[{"name":string,"handle":string,"realName":string,"bio":string,"description":string,"followers":number}],\n' : ''}"follows":[{"from":handle,"to":handle}],"unfollows":[{"from":handle,"to":handle}],
 "likes":[{"handle":string,"postId":number}],
 ${UPDATES_SCHEMA}}`;
 
@@ -299,7 +320,7 @@ ${UPDATES_SCHEMA}}`;
         content: `${worldPreamble(world)}
 You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = a post id from the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
 ${dmsAllowed ? '"dms": optionally 0-2 private messages from NPCs to the human\'s personas, only when motivated (drama, relationships, something the human did, flirting, threats, gossip).' : ''}
-${newUserAllowed ? '"newUsers": optionally 0-1 brand-new account joining the platform because of current events (a new user may also post in this same response using their handle).' : ''}
+${newUserAllowed ? `"newUsers": optionally 0-1 brand-new account joining the platform because of current events (a new user may also post in this same response using their handle).\n${ACCOUNT_FIELDS}` : ''}
 "follows"/"unfollows"/"likes": realistic social reactions (people unfollow after drama, follow after viral posts, like posts they agree with).
 ${UPDATES_RULES}
 Return ONLY JSON: ${schema}`
@@ -324,7 +345,8 @@ Return ONLY JSON: ${schema}`
   const aliases = new Map(); // handle the model used -> the account actually created
   if (newUserAllowed) {
     for (const u of arr(out.newUsers).slice(0, 1)) {
-      if (u?.name && !db.prepare('SELECT 1 FROM characters WHERE world_id = ? AND lower(name) = lower(?)').get(worldId, u.name)) {
+      const who = u?.realName || u?.name;
+      if (u?.name && !db.prepare("SELECT 1 FROM characters WHERE world_id = ? AND (lower(name) = lower(?) OR lower(real_name) = lower(?))").get(worldId, u.name, who)) {
         const c = insertCharacter(worldId, { ...u, kind: 'generated' });
         allowed.add(c.id);
         aliases.set(makeHandle(u.handle || u.name), c);
@@ -407,7 +429,7 @@ export async function generateReplies(postId, { count, humanReplyId } = {}) {
 
   const human = humanReplyId ? thread.find((t) => t.id === Number(humanReplyId)) : null;
   const text = shown.map((t) => t.content).join('\n');
-  const mentioned = pool.filter((c) => new RegExp(`@${escapeRe(c.handle)}\\b|\\b${escapeRe(c.name)}\\b`, 'i').test(human ? human.content : text));
+  const mentioned = pool.filter((c) => new RegExp(`@${escapeRe(c.handle)}\\b|${knownNames(c).map((n) => `\\b${escapeRe(n)}\\b`).join('|')}`, 'i').test(human ? human.content : text));
   const participants = pool.filter((c) => thread.some((t) => t.character_id === c.id));
   const op = pool.find((c) => c.id === root.character_id);
   const lastAuthor = thread[thread.length - 1]?.character_id;
@@ -419,7 +441,7 @@ export async function generateReplies(postId, { count, humanReplyId } = {}) {
   const ps = personas(world.id);
   const humansHere = ps.filter((p) => thread.some((t) => t.character_id === p.id));
   const state = worldContext(world.id, { focus: responders, others: humansHere, memoriesPer: 3 });
-  const lore = activateLore(world.id, `${text}\n${responders.map((r) => r.name).join(' ')}`, undefined, { boost: responders.map((r) => r.name) });
+  const lore = activateLore(world.id, `${text}\n${responders.flatMap(knownNames).join(' ')}`, undefined, { boost: responders.flatMap(knownNames) });
 
   const out = await completeJSON({
     task: 'replies', expect: 'replies',

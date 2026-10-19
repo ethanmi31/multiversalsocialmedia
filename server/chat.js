@@ -1,7 +1,7 @@
 import { db, estimateTokens, getSettings } from './db.js';
 import { activateLore } from './lorebook.js';
 import { complete, completeJSON, stream, httpError } from './openrouter.js';
-import { characterCard, clip, escapeRe, getWorld, worldPreamble, personaBlock } from './engine.js';
+import { characterCard, clip, escapeRe, getWorld, worldPreamble, personaBlock, realName, knownNames } from './engine.js';
 import { applyUpdates, notify, notifyForPost, publicHistory, recentPostsBy, resolver, worldContext, UPDATES_SCHEMA, UPDATES_RULES } from './worldstate.js';
 
 const join = (parts) => parts.filter(Boolean).join('\n\n');
@@ -59,7 +59,7 @@ export function pickResponder(convId) {
   const last = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1').get(convId);
   if (last) {
     const named = members.find(
-      (m) => m.id !== last.character_id && (new RegExp(`\\b${escapeRe(m.name.split(' ')[0])}\\b`, 'i').test(last.content) || last.content.includes('@' + m.handle))
+      (m) => m.id !== last.character_id && (knownNames(m).some((n) => new RegExp(`\\b${escapeRe(n.split(' ')[0])}\\b`, 'i').test(last.content)) || last.content.includes('@' + m.handle))
     );
     if (named) return named;
   }
@@ -115,11 +115,11 @@ function buildDmPrompt(conv, speaker) {
   const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
   const others = members.filter((m) => m.id !== speaker.id);
   const hist = history(conv, s.recentMessages);
-  const lore = activateLore(conv.world_id, [...hist.slice(-s.scanDepth).map((m) => m.content), speaker.name, ...others.map((o) => o.name)].join('\n'), undefined, { boost: [speaker.name] });
+  const lore = activateLore(conv.world_id, [...hist.slice(-s.scanDepth).map((m) => m.content), ...knownNames(speaker), ...others.flatMap(knownNames)].join('\n'), undefined, { boost: knownNames(speaker) });
 
   const stable = join([
     worldPreamble(world),
-    `You are ${speaker.name}. Stay in character at all times.`,
+    `You are ${realName(speaker)}${realName(speaker) !== speaker.name ? `, online as "${speaker.name}" (@${speaker.handle})` : ''}. Stay in character at all times.`,
     `YOUR CHARACTER:\n${characterCard(speaker)}`,
     player && personaBlock([player]),
     others.length && `ALSO IN THIS CHAT:\n${others.map((o) => characterCard(o, { brief: true })).join('\n\n')}`,
@@ -142,7 +142,7 @@ function buildScenePrompt(conv) {
   const npcs = conversationMembers(conv.id).filter((m) => m.kind !== 'player');
   const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
   const hist = history(conv, s.recentMessages);
-  const lore = activateLore(conv.world_id, [conv.setting, ...hist.slice(-s.scanDepth).map((m) => m.content), ...npcs.map((n) => n.name)].join('\n'), undefined, { boost: npcs.map((n) => n.name) });
+  const lore = activateLore(conv.world_id, [conv.setting, ...hist.slice(-s.scanDepth).map((m) => m.content), ...npcs.flatMap(knownNames)].join('\n'), undefined, { boost: npcs.flatMap(knownNames) });
   const you = player ? player.name : 'the user\'s character';
 
   const stable = join([
@@ -199,7 +199,7 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
 /** Strips a leading "Name:" and cuts the reply where the model starts writing lines for someone else. */
 function cleanReply(text, members, playerId) {
   const player = playerId ? db.prepare('SELECT name FROM characters WHERE id = ?').get(playerId) : null;
-  const names = [...new Set([...members.map((m) => m.name), player?.name, 'User', 'You'].filter(Boolean))];
+  const names = [...new Set([...members.flatMap(knownNames), player?.name, 'User', 'You'].filter(Boolean))];
   const alt = names.map(escapeRe).join('|');
   let out = text.replace(new RegExp(`^\\s*\\**(?:${alt})\\**\\s*:\\s*`, 'i'), '');
   const cut = out.search(new RegExp(`\\n\\s*\\**(?:${alt})\\**\\s*:`, 'i'));
