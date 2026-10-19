@@ -23,24 +23,68 @@ export async function extractText(file) {
   return file.buffer.toString('utf8');
 }
 
-/** Detects a SillyTavern World Info / lorebook export and converts it to our entry shape. */
+/**
+ * Parses SillyTavern lorebooks into our entry shape. Accepts:
+ * - World Info exports: {"entries": {"0": {key, keysecondary, comment, content, constant, order, disable, ...}}}
+ * - Character cards with an embedded book: {"data": {"character_book": {"entries": [...]}}} (V2/V3)
+ * - Plain arrays of entries
+ * Returns null if the JSON is not a lorebook.
+ */
 export function parseSillyTavernLorebook(text) {
   let json;
-  try { json = JSON.parse(text); } catch { return null; }
-  const raw = json?.entries;
-  if (!raw) return null;
+  try { json = typeof text === 'string' ? JSON.parse(text) : text; } catch { return null; }
+  const book = json?.data?.character_book || json?.character_book || json;
+  const raw = Array.isArray(book) ? book : book?.entries;
+  if (!raw || typeof raw !== 'object') return null;
   const list = Array.isArray(raw) ? raw : Object.values(raw);
-  return list
-    .filter((e) => e && (e.content || e.keys || e.key))
-    .map((e) => ({
-      title: e.comment || e.name || (e.key || e.keys || [])[0] || 'Entry',
-      keys: [...(e.key || e.keys || []), ...(e.keysecondary || e.secondary_keys || [])].filter(Boolean),
-      content: e.content || '',
-      category: e.group || '',
-      constant: !!e.constant,
-      priority: clampPriority(e.order ?? e.insertion_order ?? 50),
-      enabled: e.disable === true || e.enabled === false ? 0 : 1
-    }));
+  const keyList = (v) => (Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : []).map((k) => String(k).trim()).filter(Boolean);
+  const entries = list
+    .filter((e) => e && typeof e === 'object' && (e.content || e.key || e.keys))
+    .map((e) => {
+      const keys = [...keyList(e.key ?? e.keys), ...keyList(e.keysecondary ?? e.secondary_keys)];
+      return {
+        title: String(e.comment || e.name || keys[0] || 'Entry').slice(0, 200),
+        keys,
+        content: String(e.content || ''),
+        category: String(e.group || e.extensions?.group || ''),
+        constant: !!e.constant,
+        priority: clampPriority(e.order ?? e.insertion_order ?? e.priority ?? 50),
+        enabled: e.disable === true || e.enabled === false ? 0 : 1
+      };
+    })
+    .filter((e) => e.content.trim());
+  return entries.length || list.length === 0 ? entries : null;
+}
+
+/** Character card PNGs carry their JSON (and any embedded lorebook) base64-encoded in a tEXt chunk. */
+export function readPngCard(buffer) {
+  if (buffer.readUInt32BE(0) !== 0x89504e47) return null;
+  let off = 8;
+  while (off + 8 < buffer.length) {
+    const len = buffer.readUInt32BE(off);
+    const type = buffer.toString('latin1', off + 4, off + 8);
+    if (type === 'tEXt') {
+      const data = buffer.subarray(off + 8, off + 8 + len);
+      const sep = data.indexOf(0);
+      const keyword = data.toString('latin1', 0, sep);
+      if (keyword === 'ccv3' || keyword === 'chara') {
+        try { return JSON.parse(Buffer.from(data.toString('latin1', sep + 1), 'base64').toString('utf8')); } catch {}
+      }
+    }
+    if (type === 'IEND') break;
+    off += 12 + len;
+  }
+  return null;
+}
+
+/** Imports parsed entries, skipping ones already in this universe (same title and content). */
+export function importEntries(worldId, entries) {
+  const existing = new Set(
+    db.prepare('SELECT title, content FROM lore_entries WHERE world_id = ?').all(worldId).map((e) => `${e.title.toLowerCase()}\u0000${e.content.trim()}`)
+  );
+  const fresh = entries.filter((e) => !existing.has(`${e.title.toLowerCase()}\u0000${e.content.trim()}`));
+  insertEntries(worldId, fresh);
+  return { imported: fresh.length, skipped: entries.length - fresh.length };
 }
 
 // ---------------------------------------------------------------------------

@@ -210,6 +210,30 @@ function Lorebook({ worldId, notify, version, onChange }) {
   const load = () => api.get(`/worlds/${worldId}/lore?q=${encodeURIComponent(q)}`).then(setEntries);
   useEffect(() => { load(); }, [worldId, q, version]);
 
+  const importRef = useRef();
+  async function importLorebooks(e) {
+    const files = [...e.target.files];
+    e.target.value = '';
+    if (!files.length) return;
+    const fd = new FormData();
+    files.forEach((f) => fd.append('files', f));
+    try {
+      const results = await api.post(`/worlds/${worldId}/lore/import`, fd);
+      const ok = results.filter((r) => !r.error);
+      const imported = ok.reduce((a, r) => a + r.imported, 0);
+      const skipped = ok.reduce((a, r) => a + r.skipped, 0);
+      const failed = results.filter((r) => r.error);
+      notify(
+        `Imported ${imported} entries from ${ok.length} file(s)` + (skipped ? ` · ${skipped} duplicates skipped` : '') +
+          (failed.length ? ` · ${failed.map((f) => `${f.name}: ${f.error}`).join('; ')}` : ''),
+        failed.length && !ok.length ? 'error' : 'info'
+      );
+      onChange();
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  }
+
   const totalTokens = entries.reduce((a, e) => a + e.tokens, 0);
 
   return (
@@ -217,6 +241,8 @@ function Lorebook({ worldId, notify, version, onChange }) {
       <header className="row space">
         <h2>5. Lorebook <span className="badge">{entries.length} entries · ~{fmtNum(totalTokens)} tokens total</span></h2>
         <div className="row">
+          <input ref={importRef} type="file" accept=".json,.png" multiple hidden onChange={importLorebooks} />
+          <button className="primary" onClick={() => importRef.current.click()}>Import SillyTavern lorebooks…</button>
           <a className="button" href={`/api/worlds/${worldId}/lore/export`}>Export (SillyTavern)</a>
           <AsyncButton notify={notify} onClick={async () => { await api.post(`/worlds/${worldId}/lore`, { title: 'New entry' }); onChange(); }}>+ Entry</AsyncButton>
         </div>
@@ -242,7 +268,7 @@ function Lorebook({ worldId, notify, version, onChange }) {
         {entries.map((e) => (
           <LoreEntry key={e.id} entry={e} open={open === e.id} onToggle={() => setOpen(open === e.id ? null : e.id)} notify={notify} onChange={() => { load(); onChange(); }} />
         ))}
-        {!entries.length && <div className="muted small">No entries yet. Upload a document and compile it.</div>}
+        {!entries.length && <div className="muted small">No entries yet. Import SillyTavern lorebooks above, or upload a document and compile it.</div>}
       </div>
     </section>
   );

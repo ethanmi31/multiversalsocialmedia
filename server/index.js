@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { db, getSettings, saveSettings, estimateTokens, DEFAULT_SETTINGS } from './db.js';
 import {
-  extractText, parseSillyTavernLorebook, insertEntries, startCompile, getJob, estimateCompile, summarizeWorld, activateLore
+  extractText, parseSillyTavernLorebook, readPngCard, importEntries, insertEntries, startCompile, getJob, estimateCompile, summarizeWorld, activateLore
 } from './lorebook.js';
 import {
   generateCharacters, draftCharacter, worldTick, generateReplies, rollViewReplies, insertCharacter, uniqueHandle,
@@ -116,10 +116,7 @@ api.post('/worlds/:id/document', upload.single('file'), async (req, res) => {
   const text = await extractText(req.file);
   if (req.file.originalname.toLowerCase().endsWith('.json')) {
     const entries = parseSillyTavernLorebook(text);
-    if (entries) {
-      insertEntries(worldId, entries);
-      return res.json({ imported: entries.length, kind: 'lorebook' });
-    }
+    if (entries) return res.json({ ...importEntries(worldId, entries), kind: 'lorebook' });
   }
   const append = req.query.append === '1';
   const w = db.prepare('SELECT source_text, source_name FROM worlds WHERE id = ?').get(worldId);
@@ -175,6 +172,19 @@ api.delete('/lore/:id', (req, res) => {
 api.post('/worlds/:id/lore/test', (req, res) => {
   const r = activateLore(id(req.params.id), req.body.text || '');
   res.json({ tokens: r.tokens, entries: r.entries.map((e) => ({ id: e.id, title: e.title, tokens: e.tokens, constant: !!e.constant })) });
+});
+/** Import one or more SillyTavern lorebooks (.json World Info, or character cards .json/.png with an embedded book). */
+api.post('/worlds/:id/lore/import', upload.array('files', 50), (req, res) => {
+  const wid = id(req.params.id);
+  if (!req.files?.length) throw httpError(400, 'No files uploaded');
+  const results = req.files.map((f) => {
+    const name = f.originalname;
+    const json = name.toLowerCase().endsWith('.png') ? readPngCard(f.buffer) : f.buffer.toString('utf8');
+    const entries = json ? parseSillyTavernLorebook(json) : null;
+    if (!entries) return { name, error: 'not a SillyTavern lorebook (or the card has no embedded lorebook)' };
+    return { name, ...importEntries(wid, entries) };
+  });
+  res.json(results);
 });
 api.get('/worlds/:id/lore/export', (req, res) => {
   const entries = db.prepare('SELECT * FROM lore_entries WHERE world_id = ?').all(id(req.params.id));

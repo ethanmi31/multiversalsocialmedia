@@ -19,7 +19,8 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
 
 1. **Create a universe.** Click ＋ in the sidebar. Each universe is fully separate: its own lore, characters, posts, DMs, memories and drama.
 2. **World & Lore.**
-   - **Source document:** upload your world document (.txt, .md, .docx or .pdf, any size), or import a SillyTavern lorebook `.json`.
+   - **Source document:** upload your world document (.txt, .md, .docx or .pdf, any size). Tick *Append* to add more documents.
+   - **Import SillyTavern lorebooks** (in the Lorebook section): select one or more World Info `.json` exports or character cards (`.json`/`.png` with an embedded lorebook). Keywords, always-on, order and disabled state carry over, and re-importing skips duplicates.
    - **Structuring instructions:** how the compiler should organize the document into lore entries.
    - **Compile:** **Estimate cost**, then **Compile with AI** (it keeps short dialogue samples so characters sound right), or use the free **Quick split**.
    - **Random users:** how the AI should create random accounts for this universe.
