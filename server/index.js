@@ -207,9 +207,9 @@ api.get('/worlds/:id/state', (req, res) => {
   res.json({ storylines, relationships });
 });
 api.put('/storylines/:id', (req, res) => {
-  const { title, summary, status, heat } = req.body;
-  db.prepare('UPDATE storylines SET title = ?, summary = ?, status = ?, heat = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-    .run(title, summary, status === 'resolved' ? 'resolved' : 'active', Number(heat) || 0, id(req.params.id));
+  const { title, summary, status, heat, visibility } = req.body;
+  db.prepare('UPDATE storylines SET title = ?, summary = ?, status = ?, heat = ?, visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(title, summary, status === 'resolved' ? 'resolved' : 'active', Number(heat) || 0, visibility === 'private' ? 'private' : 'public', id(req.params.id));
   res.json({ ok: true });
 });
 api.post('/worlds/:id/storylines', (req, res) => {

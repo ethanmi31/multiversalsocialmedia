@@ -48,14 +48,18 @@ export function applyUpdates(worldId, u, source = 'feed') {
       const existing = db.prepare('SELECT * FROM storylines WHERE world_id = ? AND lower(title) = lower(?)').get(worldId, String(s.title));
       const status = s.status === 'resolved' ? 'resolved' : 'active';
       const heat = Math.max(0, Math.min(100, Number(s.heat) || 50));
+      const visibility = s.visibility === 'private' ? 'private' : 'public';
       if (existing) {
         const merged = [...new Set([...JSON.parse(existing.involved || '[]'), ...involved])];
-        db.prepare('UPDATE storylines SET summary = ?, involved = ?, status = ?, heat = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-          .run(String(s.summary || existing.summary), JSON.stringify(merged), status, heat, existing.id);
+        // once something is public it can't become secret again
+        const vis = existing.visibility === 'public' ? 'public' : visibility;
+        db.prepare('UPDATE storylines SET summary = ?, involved = ?, status = ?, heat = ?, visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(String(s.summary || existing.summary), JSON.stringify(merged), status, heat, vis, existing.id);
+        if (vis === 'public' && existing.visibility !== 'public' && heat >= 70) notify(worldId, { type: 'event', text: `Trending: ${s.title}` });
       } else {
-        db.prepare('INSERT INTO storylines (world_id, title, summary, involved, status, heat) VALUES (?, ?, ?, ?, ?, ?)')
-          .run(worldId, String(s.title).slice(0, 120), String(s.summary || ''), JSON.stringify(involved), status, heat);
-        if (heat >= 70) notify(worldId, { type: 'event', text: `Trending: ${s.title}` });
+        db.prepare('INSERT INTO storylines (world_id, title, summary, involved, status, heat, visibility) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(worldId, String(s.title).slice(0, 120), String(s.summary || ''), JSON.stringify(involved), status, heat, visibility);
+        if (heat >= 70 && visibility === 'public') notify(worldId, { type: 'event', text: `Trending: ${s.title}` });
       }
     }
 
@@ -193,25 +197,35 @@ export function simulateEngagement(worldId) {
  */
 export function worldContext(worldId, { focus = [], others = [], budget = getSettings().worldStateBudget, memoriesPer = 5 } = {}) {
   const ids = new Set([...focus, ...others].map((c) => c.id));
+  const focusIds = new Set(focus.map((c) => c.id));
   const name = new Map(worldCharacters(worldId).map((c) => [c.id, `@${c.handle}`]));
   const parts = [];
 
   const stories = db.prepare("SELECT * FROM storylines WHERE world_id = ? AND status = 'active' ORDER BY heat DESC, updated_at DESC LIMIT 20").all(worldId);
   const relevant = stories
     .map((s) => ({ s, inv: JSON.parse(s.involved || '[]') }))
+    // private storylines are only known to the NPCs involved in them
+    .filter(({ s, inv }) => s.visibility !== 'private' || inv.some((i) => focusIds.has(i)))
     .sort((a, b) => b.inv.filter((i) => ids.has(i)).length - a.inv.filter((i) => ids.has(i)).length || b.s.heat - a.s.heat)
     .slice(0, 6);
   if (relevant.length) {
     parts.push(
       'ONGOING STORYLINES / DRAMA:\n' +
-        relevant.map(({ s, inv }) => `- ${s.title} [heat ${s.heat}] (${inv.map((i) => name.get(i)).filter(Boolean).join(', ')}): ${s.summary}`).join('\n')
+        relevant
+          .map(({ s, inv }) => {
+            const who = inv.map((i) => name.get(i)).filter(Boolean).join(', ');
+            const tag = s.visibility === 'private' ? ` PRIVATE — only ${who} know; nobody else may reference it unless told` : '';
+            return `- ${s.title} [heat ${s.heat}${tag}] (${who}): ${s.summary}`;
+          })
+          .join('\n')
     );
   }
 
-  if (ids.size) {
-    const list = [...ids].join(',');
+  if (focusIds.size) {
+    // each NPC only knows their own feelings about people, not everyone else's
+    const list = [...focusIds].join(',');
     const rels = db
-      .prepare(`SELECT * FROM relationships WHERE world_id = ? AND (from_id IN (${list}) OR to_id IN (${list})) ORDER BY abs(score) DESC, updated_at DESC LIMIT 30`)
+      .prepare(`SELECT * FROM relationships WHERE world_id = ? AND from_id IN (${list}) ORDER BY abs(score) DESC, updated_at DESC LIMIT 30`)
       .all(worldId)
       // relationships between the people in this scene first
       .sort((a, b) => (ids.has(b.from_id) && ids.has(b.to_id)) - (ids.has(a.from_id) && ids.has(a.to_id)))
@@ -253,7 +267,7 @@ export function recentPostsBy(characterId, limit = 4) {
 }
 
 export const UPDATES_SCHEMA = `"updates":{
-  "storylines":[{"title":string,"summary":string (current state, 1-2 sentences),"involved":[handles],"status":"active"|"resolved","heat":0-100}],
+  "storylines":[{"title":string,"summary":string (current state, 1-2 sentences),"involved":[handles],"status":"active"|"resolved","heat":0-100,"visibility":"public"|"private"}],
   "relationships":[{"from":handle,"to":handle,"status":string (e.g. "furious after the leak"),"score":-100..100}],
   "memories":[{"handle":string,"memory":string (what this NPC will remember, 1 sentence)}]
 }`;

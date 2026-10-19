@@ -366,6 +366,10 @@ function Storyline({ s: initial, notify, onChange }) {
             <option value="active">active</option>
             <option value="resolved">resolved</option>
           </select>
+          <select value={s.visibility || 'public'} onChange={(e) => setS({ ...s, visibility: e.target.value })} style={{ width: 110 }} title="Private: only the people involved know about it">
+            <option value="public">public</option>
+            <option value="private">private</option>
+          </select>
           <label className="inline small">heat <input type="number" min={0} max={100} value={s.heat} onChange={(e) => setS({ ...s, heat: e.target.value })} style={{ width: 64 }} /></label>
         </div>
         <textarea rows={2} value={s.summary} onChange={(e) => setS({ ...s, summary: e.target.value })} style={{ marginTop: 6 }} />

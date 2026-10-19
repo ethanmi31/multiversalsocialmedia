@@ -20,7 +20,7 @@ export default function Feed(props) {
   const load = async () => {
     setPosts(await api.get(`/worlds/${worldId}/posts`));
     const st = await api.get(`/worlds/${worldId}/state`);
-    setTrending(st.storylines.filter((s) => s.status === 'active').slice(0, 5));
+    setTrending(st.storylines.filter((s) => s.status === 'active' && s.visibility !== 'private').slice(0, 5));
   };
   useEffect(() => { load(); }, [worldId]);
 

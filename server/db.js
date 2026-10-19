@@ -182,6 +182,7 @@ addColumn('conversations', 'observed_upto', 'INTEGER DEFAULT 0'); // last messag
 addColumn('conversations', 'unread', 'INTEGER DEFAULT 0');
 addColumn('worlds', 'last_tick_at', 'TEXT');
 addColumn('worlds', 'npc_instructions', "TEXT DEFAULT ''"); // how random users should be generated
+addColumn('storylines', 'visibility', "TEXT DEFAULT 'public'"); // private = only the people involved know
 addColumn('characters', 'real_name', "TEXT DEFAULT ''"); // who they really are; `name` is the display name on their profile
 
 export const DEFAULT_SETTINGS = {

@@ -199,7 +199,7 @@ function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfil
           </select>
         )}
         <AsyncButton className="link small" notify={notify} busyLabel="Spreading…" title="Make what happened here affect the world now (memories, drama, posts)"
-          onClick={async () => { const r = await api.post(`/conversations/${id}/observe`); notify(r.posts ? `Word got out: ${r.posts} new post(s)` : 'The world will remember this.'); }}>
+          onClick={async () => { const r = await api.post(`/conversations/${id}/observe`); notify(r.posts ? `Word got out: ${r.posts} new post(s)` : r.witnesses ? 'The people who were there will remember this.' : 'Nobody saw anything — it stays private.'); }}>
           Let it spread
         </AsyncButton>
         <button className="link small" onClick={() => setShowMemory(!showMemory)}>Memory</button>

@@ -257,6 +257,27 @@ function cleanScene(text, conv) {
   return out.trim();
 }
 
+/** Drops any consequence the model gave to someone who couldn't know about it. */
+function restrictToWitnesses(u, find, witnesses, player, anyPublic) {
+  if (!u || typeof u !== 'object') return {};
+  const knows = (h) => {
+    const c = find(h);
+    return c && witnesses.has(c.id);
+  };
+  const isPlayer = (h) => player && find(h)?.id === player.id;
+  return {
+    memories: (u.memories || []).filter((m) => knows(m?.handle)),
+    relationships: (u.relationships || []).filter((r) => knows(r?.from) || isPlayer(r?.from)),
+    storylines: witnesses.size
+      ? (u.storylines || []).map((s) => ({
+          ...s,
+          involved: (s?.involved || []).filter((h) => knows(h) || isPlayer(h)),
+          visibility: anyPublic && s?.visibility !== 'private' ? 'public' : 'private'
+        }))
+      : [] // nobody saw anything: there is no drama to track
+  };
+}
+
 /** Folds older messages into a rolling summary so the prompt doesn't grow forever. */
 async function maybeSummarize(convId) {
   const s = getSettings();
@@ -313,10 +334,19 @@ export async function observeConversation(convId, { force = false } = {}) {
         {
           role: 'system',
           content: `${worldPreamble(world)}
-You track continuity for this universe. Read what just happened in ${where} and record the consequences.
+You track continuity for this universe. Read what just happened in ${where} and record the consequences — but information only spreads REALISTICALLY.
+
+Step 1, "events": list the meaningful things that happened, and for each one exactly who knows about it:
+- "witnesses": NPC handles who were there and saw/heard it, or were directly told (a call, a text) during it. Nobody else.
+- Things ${player?.name || 'the human'} did alone and unseen are known to NO ONE: give them an empty witnesses list. Mundane or private details (using the bathroom, eating, sleeping, private thoughts, minor errands, travel) are not events at all — leave them out entirely.
+- "public": true only if it happened in front of a crowd, was filmed/posted, or is newsworthy enough to spread on its own. Private conversations are not public.
+
+Step 2, consequences — ONLY for witnesses:
+- "memories" and "relationships" (from = the witness) only for NPCs in that event's witnesses.
+- "posts": 0-2 posts a witness would plausibly make right now (venting, subtweeting, bragging, leaking screenshots) about something they know. People post about things that are interesting or dramatic to them, never routine details. Private people may stay quiet. Never reveal things the poster couldn't know.
+- "storylines": "visibility" is "private" (only the involved know) unless the event is public.
 ${UPDATES_RULES}
-"posts": 0-2 public posts the NPCs involved would plausibly make about it right now (venting, subtweeting, bragging, leaking screenshots) — only if in character; private people may stay quiet.
-Return ONLY JSON: {"posts":[{"handle":string,"content":string}],${UPDATES_SCHEMA}}`
+Return ONLY JSON: {"events":[{"what":string,"witnesses":[handles],"public":boolean}],"posts":[{"handle":string,"content":string}],${UPDATES_SCHEMA}}`
         },
         {
           role: 'user',
@@ -332,17 +362,26 @@ Return ONLY JSON: {"posts":[{"handle":string,"content":string}],${UPDATES_SCHEMA
     });
     const find = resolver(conv.world_id);
     const npcIds = new Set(npcs.map((n) => n.id));
+    const events = Array.isArray(out.events) ? out.events : [];
+    // Who actually knows: DM participants and people present always do; others only if listed as a witness.
+    const witnesses = new Set(present.map((n) => n.id));
+    for (const e of events) for (const h of Array.isArray(e?.witnesses) ? e.witnesses : []) {
+      const c = find(h);
+      if (c && npcIds.has(c.id)) witnesses.add(c.id);
+    }
+    const anyPublic = events.some((e) => e?.public === true);
+    const updates = restrictToWitnesses(out.updates, find, witnesses, player, anyPublic);
     let posts = 0;
     for (const p of (Array.isArray(out.posts) ? out.posts : []).slice(0, 2)) {
       const c = find(p?.handle);
-      if (!c || !npcIds.has(c.id) || !p.content) continue;
+      if (!c || !witnesses.has(c.id) || !p.content) continue; // you can't post about what you never saw
       const id = Number(db.prepare('INSERT INTO posts (world_id, character_id, content, likes) VALUES (?, ?, ?, ?)').run(conv.world_id, c.id, String(p.content).trim(), Math.floor(Math.random() * 40)).lastInsertRowid);
       notifyForPost(conv.world_id, id);
       posts++;
     }
-    applyUpdates(conv.world_id, out.updates, conv.kind === 'scene' ? 'scene' : 'dm');
+    applyUpdates(conv.world_id, updates, conv.kind === 'scene' ? 'scene' : 'dm');
     db.prepare('UPDATE conversations SET observed_upto = ? WHERE id = ?').run(msgs[msgs.length - 1].id, convId);
-    return { posts };
+    return { posts, witnesses: witnesses.size };
   } finally {
     observing.delete(convId);
   }
