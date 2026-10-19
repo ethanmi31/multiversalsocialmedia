@@ -172,6 +172,7 @@ Return ONLY a JSON object: {"entries":[{"title":string,"category":string,"keys":
 Default rules (the user's instructions below override these):
 - One entry per distinct subject (character, place, faction, item, event, concept, rule).
 - "content": dense, factual, third person, self-contained (name the subject in the first sentence). Usually 40-150 words. Keep details that matter for roleplay: appearance, personality, relationships, history, abilities, current status. Drop filler prose.
+- For characters, also keep 1-3 short VERBATIM example lines of their dialogue from the source (in quotes) that show how they talk — these are used to match their voice.
 - "keys": 2-6 specific triggers: names, nicknames, titles, distinctive terms. Never generic words like "the", "city", "war" alone.
 - "category": e.g. Character, Location, Faction, Item, Event, Concept, Rule.
 - "priority": 0-100. Higher for core subjects.
@@ -381,7 +382,7 @@ function keyRegex(key) {
  * Scans text for lorebook keywords and returns the entries that fit within the token budget.
  * Constant entries go first, then by priority, then by how many keys matched.
  */
-export function activateLore(worldId, scanText, budget = getSettings().loreBudget, { recursive = true, exclude = [] } = {}) {
+export function activateLore(worldId, scanText, budget = getSettings().loreBudget, { recursive = true, exclude = [], boost = [] } = {}) {
   const all = db.prepare('SELECT * FROM lore_entries WHERE world_id = ? AND enabled = 1').all(worldId);
   const excluded = new Set(exclude.map((t) => t.toLowerCase()));
   const hits = new Map();
@@ -403,8 +404,12 @@ export function activateLore(worldId, scanText, budget = getSettings().loreBudge
     if (firstPass) scan(firstPass, 1);
   }
 
+  // boosted entries (e.g. the speaking character's own) are kept first when the budget is tight
+  const boostText = boost.join('\n');
+  const boosted = (e) => (boostText && JSON.parse(e.keys || '[]').some((k) => k && keyRegex(k).test(boostText)) ? 1 : 0);
+  for (const h of hits.values()) h.boost = boosted(h.e);
   const ranked = [...hits.values()].sort(
-    (a, b) => b.e.constant - a.e.constant || (a.depth || 0) - (b.depth || 0) || b.e.priority - a.e.priority || b.score - a.score
+    (a, b) => b.e.constant - a.e.constant || b.boost - a.boost || (a.depth || 0) - (b.depth || 0) || b.e.priority - a.e.priority || b.score - a.score
   );
   const chosen = [];
   let tokens = 0;

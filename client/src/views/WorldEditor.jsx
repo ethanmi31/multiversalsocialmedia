@@ -11,6 +11,12 @@ const INSTRUCTION_EXAMPLE = `Example:
 - Ignore the "Author's Notes" section.
 - Use nicknames and titles as keywords (e.g. "the Iron Queen" for Queen Maren).`;
 
+const NPC_EXAMPLE = `Example:
+- Mostly fans and haters of the main characters, plus a few gossip/news accounts.
+- Some are variants from other universes who crossed over; say which universe in their description.
+- Mix of ages; lots of chronically-online teens. Usernames should look like real handles.
+- No other characters from the lore unless I add them myself.`;
+
 export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted }) {
   const [w, setW] = useState(null);
   const [dirty, setDirty] = useState(false);
@@ -44,7 +50,8 @@ export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted 
 
   async function save() {
     await api.put(`/worlds/${worldId}`, {
-      name: w.name, description: w.description, summary: w.summary, rules: w.rules, instructions: w.instructions, source_text: w.source_text
+      name: w.name, description: w.description, summary: w.summary, rules: w.rules, instructions: w.instructions,
+      npc_instructions: w.npc_instructions, source_text: w.source_text
     });
     setDirty(false);
     setEstimate(null);
@@ -167,12 +174,20 @@ export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted 
             Regenerate summary
           </AsyncButton>
         </div>
-        <label>World rules / roleplay instructions
+        <label>World rules — story-specific instructions for this universe only
           <textarea rows={4} value={w.rules} onChange={set('rules')} placeholder="e.g. Magic is rare and feared. Keep a dark, gritty tone. Characters use in-world slang. No modern technology." />
         </label>
       </section>
 
+      <section className="card">
+        <h2>Random users</h2>
+        <p className="muted small">How the AI should create random users for this universe — used by "Generate random users" and when new accounts join on their own. Only applies to this universe.</p>
+        <textarea rows={5} value={w.npc_instructions || ''} onChange={set('npc_instructions')} placeholder={NPC_EXAMPLE} />
+      </section>
+
       <Lorebook worldId={worldId} notify={notify} version={w.loreCount} onChange={() => { load(); refreshWorlds(); }} />
+
+      <WorldState worldId={worldId} notify={notify} />
 
       <section className="card danger-zone">
         <AsyncButton notify={notify} className="danger" onClick={async () => {
@@ -267,6 +282,69 @@ function LoreEntry({ entry, open, onToggle, notify, onChange }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The hidden "back-end" state: storylines and the relationship matrix. View/edit only when you want a "system update". */
+function WorldState({ worldId, notify }) {
+  const [state, setState] = useState(null);
+  const load = () => api.get(`/worlds/${worldId}/state`).then(setState);
+  useEffect(() => { load(); }, [worldId]);
+  if (!state) return null;
+
+  return (
+    <section className="card">
+      <details>
+        <summary><b>World state (system update)</b> — {state.storylines.filter((s) => s.status === 'active').length} active storylines, {state.relationships.length} relationships</summary>
+        <p className="muted small">What the engine tracks behind the scenes so drama develops and people remember. It updates itself; edit or delete anything that went off the rails.</p>
+        <div className="row space"><h2>Storylines</h2>
+          <AsyncButton notify={notify} onClick={async () => { await api.post(`/worlds/${worldId}/storylines`, { title: prompt('Storyline title?') || 'New storyline' }); load(); }}>+ Storyline</AsyncButton>
+        </div>
+        {state.storylines.map((s) => <Storyline key={s.id} s={s} notify={notify} onChange={load} />)}
+        {!state.storylines.length && <div className="muted small">Nothing yet — storylines appear as the world plays out.</div>}
+        <h2 style={{ marginTop: 16 }}>Relationships</h2>
+        <table>
+          <tbody>
+            {state.relationships.map((r) => (
+              <tr key={`${r.from_id}-${r.to_id}`}>
+                <td>@{r.from?.handle} → @{r.to?.handle}</td>
+                <td>{r.status}</td>
+                <td className={r.score < 0 ? 'error-text' : ''}>{r.score}</td>
+                <td><button className="link" onClick={async () => { await api.del(`/relationships/${r.from_id}/${r.to_id}`); load(); }}>✕</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!state.relationships.length && <div className="muted small">No relationships tracked yet.</div>}
+      </details>
+    </section>
+  );
+}
+
+function Storyline({ s: initial, notify, onChange }) {
+  const [s, setS] = useState(initial);
+  useEffect(() => setS(initial), [initial]);
+  return (
+    <div className={`lore ${s.status === 'resolved' ? 'disabled' : ''}`} style={{ marginBottom: 6 }}>
+      <div className="lore-body" style={{ borderTop: 'none', paddingTop: 10 }}>
+        <div className="row">
+          <input value={s.title} onChange={(e) => setS({ ...s, title: e.target.value })} style={{ fontWeight: 600 }} />
+          <select value={s.status} onChange={(e) => setS({ ...s, status: e.target.value })} style={{ width: 120 }}>
+            <option value="active">active</option>
+            <option value="resolved">resolved</option>
+          </select>
+          <label className="inline small">heat <input type="number" min={0} max={100} value={s.heat} onChange={(e) => setS({ ...s, heat: e.target.value })} style={{ width: 64 }} /></label>
+        </div>
+        <textarea rows={2} value={s.summary} onChange={(e) => setS({ ...s, summary: e.target.value })} style={{ marginTop: 6 }} />
+        <div className="row space small">
+          <span className="muted">{s.involved.map((c) => '@' + c.handle).join(', ')}</span>
+          <div className="row">
+            <AsyncButton className="danger" notify={notify} onClick={async () => { await api.del(`/storylines/${s.id}`); onChange(); }}>Delete</AsyncButton>
+            <AsyncButton notify={notify} onClick={async () => { await api.put(`/storylines/${s.id}`, s); notify('Saved'); onChange(); }}>Save</AsyncButton>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

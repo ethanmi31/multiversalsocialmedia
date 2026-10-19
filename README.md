@@ -17,14 +17,44 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
 
 ## How to use it
 
-1. **Create a world.** Click ＋ in the sidebar.
-2. **World & Lore → Source document.** Upload your document (.txt, .md, .docx or .pdf). Any size is fine. You can also import an existing SillyTavern lorebook `.json`.
-3. **Structuring instructions.** Tell the compiler how to organize the material: what to split into separate entries, what to skip, which nicknames to use as triggers.
-4. **Compile.** Click **Estimate cost** to see the one-time price, then **Compile with AI**. **Quick split** is a free alternative that makes one entry per heading.
-5. Review and edit the generated **lorebook** and **world summary**. Use **Test triggers** to see exactly what a message would inject and how many tokens that costs.
-6. **Characters.** Add your own characters. Mark one or more as **"You play"** to use them as your personas. Use **Generate users** to have the AI populate the world. The toggles control which characters are currently active on the world.
-7. **Feed.** Post as your persona and characters reply. **Generate activity** creates a batch of posts, optionally around an event you name ("the king just died"). **Live** mode keeps the world posting every 2 minutes while the page is open.
-8. **Messages.** Start a DM or a group chat. Replies stream in as they're written. In group chats you can pick who speaks next, press ▶ to let the characters keep talking, or press ↻ to regenerate a reply.
+1. **Create a universe.** Click ＋ in the sidebar. Each universe is fully separate: its own lore, characters, posts, DMs, memories and drama.
+2. **World & Lore.**
+   - **Source document:** upload your world document (.txt, .md, .docx or .pdf, any size), or import a SillyTavern lorebook `.json`.
+   - **Structuring instructions:** how the compiler should organize the document into lore entries.
+   - **Compile:** **Estimate cost**, then **Compile with AI** (it keeps short dialogue samples so characters sound right), or use the free **Quick split**.
+   - **Random users:** how the AI should create random accounts for this universe.
+   - **World rules:** story-specific instructions that apply to this universe only.
+3. **Characters.**
+   - Add characters with **Name, Handle, Bio and Description**. Paste a description in, or drop a file onto the box.
+   - **Bulk import** splits one document of many descriptions into characters. Use the free heading split, or the cheap AI split, which also suggests handles and bios. You review everything before importing.
+   - Mark your own characters **"You play"**. The AI never writes posts, replies, DMs or actions for them.
+   - **Generate random users** follows your random-user instructions.
+   - The toggles control who is currently on the platform.
+4. **You are…** Pick which persona you're using in the sidebar.
+5. **Feed.**
+   - **Let time pass** runs one batched "world tick": new posts, replies to existing threads, follows and unfollows, likes, DMs to you, platform events and storyline progress.
+   - Coming back after a while (30 minutes by default) runs a "while you were away" tick.
+   - Replying to a post gets answers aimed at you.
+   - Opening a thread sometimes has people already typing.
+6. **Notifications:** replies, @mentions, follows, likes, DMs and trending drama.
+7. **Messages:** DMs and group chats with real-time streaming and texting style (several short messages in a row). Characters can also DM you first.
+8. **Real Life:** in-person scenes outside the app, such as *"I drive to his house and cuss him out"*.
+   - A narrator plays every character present, and never acts for you.
+   - What happens is remembered and can show up on the feed as venting, subtweets or leaks.
+   - **Let it spread** pushes it into the world immediately. **Meet IRL** in a DM takes that conversation offline.
+9. **Profiles:** click any name to see posts, followers, follow/unfollow, Message, Meet IRL, and what that character remembers (editable).
+
+### How memory and drama work
+
+The engine tracks a hidden world state per universe. It's visible under **World & Lore → World state** if you want a "system update":
+
+- **Storylines:** ongoing drama, plots and platform events, each with a *heat* value. Hot storylines trend and pull their characters into the next tick.
+- **Relationships:** how X feels about Y (−100 to 100) plus a short status, changing on their own over time.
+- **Memories:** what each character remembers from posts, threads, DMs and scenes.
+
+These updates ride along on calls the app already makes (ticks, replies), plus a cheap "continuity" pass every few DM or scene messages. The relevant part is injected into each prompt under its own token budget. DMs also get your shared public history with that character and your recent public posts.
+
+The **global style guide** (Settings) holds the engine instructions for every universe: internet cadence, mature and unmoderated tone, no omniscient summaries, variant tracking, never writing for the human. Story-specific instructions belong in each universe's World rules.
 
 ## How it saves credits
 
@@ -37,7 +67,7 @@ Your document is **never sent to the model in full** during normal use. It works
 | **Short always-on context** | Only the world summary and world rules are sent every time. The token count is shown in the editor. |
 | **Rolling chat memory** | Older messages are folded into a summary (viewable and editable under *Memory*). Only the last *N* messages are sent word for word. |
 | **Two models** | The expensive model is used only for live chat. Compiling, generating users, posts and replies, and summaries all use the cheap utility model. |
-| **Batching** | A whole batch of feed posts, or all the replies to a thread, is generated in one request with shared context. |
+| **Batching** | A world tick (posts, replies, DMs, follows, likes, drama updates) or a whole round of thread replies is one request with shared context. Engagement numbers grow by a free local simulation. |
 | **Cache-friendly prompts** | The stable parts of a prompt (world, character card) come first and stay identical between calls, so providers that support prompt caching bill them at a discount. |
 
 The **Usage** page shows tokens and cost per task as reported by OpenRouter, so you can see where credits go. The main dials are in **Settings → Token budgets**: lore budget, scan depth, recent messages kept and max reply length.
@@ -50,8 +80,10 @@ server/
   db.js          SQLite schema and settings
   openrouter.js  OpenRouter client (streaming, JSON, usage logging, model prices)
   lorebook.js    Document parsing, chunking, AI/quick compile, keyword activation
-  engine.js      Prompt building, character/feed/reply generation, chat, summaries
+  engine.js      Character generation and import, world ticks, thread replies
+  chat.js        DMs, real-life scenes, rolling summaries, continuity tracking
+  worldstate.js  Storylines, relationships, memories, follows, likes, notifications
 client/src/
   App.jsx        Layout and navigation
-  views/         Feed, Chats, Characters, WorldEditor, Settings, Usage
+  views/         Feed, Notifications, Chats (DMs + Real Life), Characters, Profile, WorldEditor, Settings, Usage
 ```

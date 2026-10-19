@@ -1,6 +1,9 @@
-import { db, estimateTokens, getSettings } from './db.js';
+import { db, getSettings } from './db.js';
 import { activateLore } from './lorebook.js';
-import { complete, completeJSON, stream, httpError } from './openrouter.js';
+import { completeJSON, httpError } from './openrouter.js';
+import {
+  applyUpdates, notifyForPost, personas, resolver, simulateEngagement, worldContext, followerCount, UPDATES_SCHEMA, UPDATES_RULES
+} from './worldstate.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -15,57 +18,68 @@ export function colorFor(name = '') {
 }
 
 export function makeHandle(name = '') {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 20) || 'user';
+  return name.toLowerCase().replace(/^@/, '').replace(/[^a-z0-9_]+/g, '_').replace(/^_|_$/g, '').slice(0, 24) || 'user';
 }
 
-const clip = (s = '', n) => (s.length > n ? `${s.slice(0, n).trimEnd()}…` : s);
+export const clip = (s = '', n) => (s.length > n ? `${s.slice(0, n).trimEnd()}…` : s);
+export const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const arr = (v) => (Array.isArray(v) ? v : []);
+const join = (parts) => parts.filter(Boolean).join('\n\n');
 
-function getWorld(worldId) {
+export function getWorld(worldId) {
   const w = db.prepare('SELECT * FROM worlds WHERE id = ?').get(worldId);
   if (!w) throw httpError(404, 'World not found');
   return w;
 }
 
 /** The stable part of every prompt. Kept first and identical across calls so provider prompt caching can kick in. */
-function worldPreamble(world) {
-  let out = `WORLD: ${world.name}\n`;
+export function worldPreamble(world) {
+  const s = getSettings();
+  let out = s.styleGuide?.trim() ? `${s.styleGuide.trim()}\n\n` : '';
+  out += `UNIVERSE: ${world.name}\n`;
   if (world.summary) out += `${world.summary}\n`;
   else if (world.description) out += `${world.description}\n`;
-  if (world.rules?.trim()) out += `\nWORLD RULES (always follow):\n${world.rules.trim()}\n`;
+  if (world.rules?.trim()) out += `\nUNIVERSE RULES (always follow):\n${world.rules.trim()}\n`;
   return out;
 }
 
-function characterCard(c, { brief = false } = {}) {
-  const lim = brief ? 350 : 4000;
+export const fmtFollowers = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : String(n));
+
+/** Character description as the AI sees it. `persona` holds the free-form description the user pasted. */
+export function characterCard(c, { brief = false } = {}) {
   let s = `${c.name} (@${c.handle})`;
-  if (c.bio) s += ` — ${clip(c.bio, brief ? 160 : 600)}`;
-  if (c.persona) s += `\nPersonality/background: ${clip(c.persona, lim)}`;
-  if (c.style) s += `\nVoice: ${clip(c.style, brief ? 150 : 800)}`;
+  if (c.bio) s += ` — bio: "${clip(c.bio, 200)}"`;
+  if (c.kind !== 'player') s += ` · ${fmtFollowers(followerCount(c))} followers`;
+  if (c.persona) s += `\n${clip(c.persona, brief ? 700 : 6000)}`;
+  if (c.style) s += `\nVoice: ${clip(c.style, brief ? 160 : 800)}`;
   return s;
 }
 
-function uniqueHandle(worldId, wanted) {
+export function uniqueHandle(worldId, wanted, exceptId = 0) {
   const base = makeHandle(wanted);
   let handle = base;
   let n = 1;
-  while (db.prepare('SELECT 1 FROM characters WHERE world_id = ? AND handle = ?').get(worldId, handle)) handle = `${base}${++n}`;
+  while (db.prepare('SELECT 1 FROM characters WHERE world_id = ? AND handle = ? AND id != ?').get(worldId, handle, exceptId)) handle = `${base}${++n}`;
   return handle;
 }
 
+const defaultFollowers = () => Math.round(40 + Math.random() ** 3 * 8000);
+
 export function insertCharacter(worldId, c) {
   const handle = uniqueHandle(worldId, c.handle || c.name);
+  const followers = c.followers !== '' && c.followers != null && Number.isFinite(Number(c.followers)) ? Number(c.followers) : defaultFollowers();
   const r = db
-    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(worldId, c.kind || 'custom', c.name.trim(), handle, c.bio || '', c.persona || '', c.style || '', c.color || colorFor(c.name), c.active === 0 ? 0 : 1);
+    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active, followers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(worldId, c.kind || 'custom', String(c.name).trim(), handle, c.bio || '', c.persona || c.description || '', c.style || '', c.color || colorFor(c.name), c.active === 0 || c.active === false ? 0 : 1, followers);
   return db.prepare('SELECT * FROM characters WHERE id = ?').get(r.lastInsertRowid);
 }
 
-function aiCharacters(worldId) {
+export function aiCharacters(worldId) {
   return db.prepare("SELECT * FROM characters WHERE world_id = ? AND active = 1 AND kind != 'player'").all(worldId);
 }
 
-function sample(arr, n) {
-  const a = [...arr];
+export function sample(list, n) {
+  const a = [...list];
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
@@ -73,20 +87,18 @@ function sample(arr, n) {
   return a.slice(0, n);
 }
 
-function byHandle(chars) {
-  const m = new Map();
-  for (const c of chars) {
-    m.set(c.handle.toLowerCase(), c);
-    m.set(c.name.toLowerCase(), c);
-  }
-  return (h = '') => m.get(String(h).replace(/^@/, '').toLowerCase());
+export function personaBlock(ps) {
+  if (!ps.length) return '';
+  return `THE HUMAN'S PERSONAS (played by the user — NEVER write posts, replies, DMs, actions or dialogue as them):\n${ps.map((p) => characterCard(p, { brief: true })).join('\n\n')}`;
 }
 
-const randomLikes = () => Math.floor(Math.random() ** 2 * 400);
+// ---------------------------------------------------------------------------
+// Characters
+// ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Character generation
-// ---------------------------------------------------------------------------
+/** The author's own rules for what kind of random users this universe has. */
+const npcRules = (world) =>
+  world.npc_instructions?.trim() ? `THE AUTHOR'S INSTRUCTIONS FOR GENERATING USERS (follow these exactly, they override defaults):\n${world.npc_instructions.trim()}` : '';
 
 export async function generateCharacters(worldId, { count = 5, theme = '' } = {}) {
   const world = getWorld(worldId);
@@ -100,24 +112,23 @@ export async function generateCharacters(worldId, { count = 5, theme = '' } = {}
 
   const out = await completeJSON({
     task: 'generate-users',
-    maxTokens: 300 * count + 300,
+    maxTokens: 320 * count + 300,
     temperature: 1,
     messages: [
       {
         role: 'system',
-        content: `${worldPreamble(world)}\nYou invent believable social-media users who live in this world. They are ordinary and notable people alike: locals, fans, critics, officials, merchants, rivals. Each has a distinct voice and opinions rooted in the lore. Do not duplicate existing names.
-Return ONLY JSON: {"characters":[{"name":string,"handle":string,"bio":string (profile bio, <25 words),"persona":string (personality, background, ties to the lore, 40-80 words),"style":string (how they post: tone, slang, emoji, length, 10-25 words)}]}`
+        content: `${worldPreamble(world)}\nYou invent believable social-media users who live in this universe: locals, fans, critics, officials, stans, trolls, rivals, news/gossip accounts. Each has a distinct voice and opinions rooted in the lore. Do not duplicate existing names.
+Return ONLY JSON: {"characters":[{"name":string,"handle":string,"bio":string (profile bio, <25 words),"description":string (personality, background, ties to the lore, how they type online; 50-120 words),"followers":number (realistic audience size)}]}`
       },
       {
         role: 'user',
-        content: [
+        content: join([
           lore.text && `RELEVANT LORE:\n${lore.text}`,
           titles.length && `Known lore topics: ${titles.join(', ')}`,
           existing.length && `Existing users (do not reuse): ${existing.join(', ')}`,
+          npcRules(world),
           `Create ${count} new users.${theme ? ` Focus: ${theme}` : ''}`
-        ]
-          .filter(Boolean)
-          .join('\n\n')
+        ])
       }
     ]
   });
@@ -125,7 +136,7 @@ Return ONLY JSON: {"characters":[{"name":string,"handle":string,"bio":string (pr
   return list.filter((c) => c?.name).slice(0, count).map((c) => insertCharacter(worldId, { ...c, kind: 'generated' }));
 }
 
-/** Expands a rough idea into a full character card. */
+/** Expands a rough idea into a description. */
 export async function draftCharacter(worldId, { name, idea }) {
   const world = getWorld(worldId);
   const lore = activateLore(worldId, `${name}\n${idea}`);
@@ -136,7 +147,7 @@ export async function draftCharacter(worldId, { name, idea }) {
     messages: [
       {
         role: 'system',
-        content: `${worldPreamble(world)}\nFlesh out a character card for this world. Stay consistent with the lore. Return ONLY JSON: {"name":string,"handle":string,"bio":string (<25 words),"persona":string (60-150 words),"style":string (15-30 words)}`
+        content: `${worldPreamble(world)}\nFlesh out a character for this universe, consistent with the lore. Return ONLY JSON: {"name":string,"handle":string,"bio":string (<25 words),"description":string (personality, background, relationships, how they type online; 80-180 words)}`
       },
       { role: 'user', content: `${lore.text ? `RELEVANT LORE:\n${lore.text}\n\n` : ''}Name: ${name || '(invent one)'}\nIdea: ${idea || '(surprise me)'}` }
     ]
@@ -144,260 +155,311 @@ export async function draftCharacter(worldId, { name, idea }) {
 }
 
 // ---------------------------------------------------------------------------
-// Feed
+// Bulk character import: split a pasted document of descriptions into characters
 // ---------------------------------------------------------------------------
 
-function recentPosts(worldId, limit = 12) {
-  return db
-    .prepare(
-      `SELECT p.id, p.content, p.parent_id, c.handle FROM posts p JOIN characters c ON c.id = p.character_id
-       WHERE p.world_id = ? ORDER BY p.id DESC LIMIT ?`
-    )
-    .all(worldId, limit)
-    .reverse();
+/** Free split: by markdown headings, "Name:" lines, --- separators, or big blank-line gaps. */
+export function splitCharactersFree(text) {
+  const t = text.replace(/\r\n?/g, '\n').trim();
+  let blocks;
+  if (/^#{1,6}\s+/m.test(t)) blocks = t.split(/\n(?=#{1,6}\s+)/);
+  else if (/^\s*name\s*:/im.test(t)) blocks = t.split(/\n(?=\s*name\s*:)/i);
+  else if (/\n\s*(-{3,}|\*{3,}|_{3,})\s*\n/.test(t)) blocks = t.split(/\n\s*(?:-{3,}|\*{3,}|_{3,})\s*\n/);
+  else blocks = t.split(/\n\s*\n\s*\n/);
+  return blocks
+    .map((b) => b.trim())
+    .filter(Boolean)
+    .map((b) => {
+      const [first, ...rest] = b.split('\n');
+      const name = first.replace(/^#{1,6}\s*|^\s*name\s*[:\-]\s*/i, '').replace(/[*_#]/g, '').trim().slice(0, 60);
+      const description = rest.join('\n').trim();
+      return { name, handle: makeHandle(name), bio: '', description: description || b };
+    });
 }
 
-/** Generates a batch of posts in ONE request (shared context = far fewer tokens than one call per post). */
-export async function generateFeed(worldId, { count = 5, topic = '' } = {}) {
+/**
+ * AI-assisted split. To keep it cheap the model never rewrites the descriptions: it only returns
+ * names, handles, bios and the first words of each character's section; we slice the text locally.
+ */
+export async function splitCharactersAI(worldId, text) {
+  const world = getWorld(worldId);
+  const pieces = [];
+  const maxChars = 40000;
+  for (let i = 0; i < text.length; i += maxChars) pieces.push(text.slice(i, i + maxChars));
+  const result = [];
+  for (const piece of pieces) {
+    const out = await completeJSON({
+      task: 'import-characters',
+      maxTokens: 2500,
+      temperature: 0.4,
+      messages: [
+        {
+          role: 'system',
+          content: `The user pasted character descriptions for social-media accounts in the universe "${world.name}". Identify each separate character.
+For each, return: "name"; "handle" (a fitting social-media handle, no @); "bio" (a short in-character profile bio, <20 words, based on the description); "start" (the EXACT first 6-10 words of that character's section, copied verbatim so it can be found in the text).
+Return ONLY JSON: {"characters":[{"name":string,"handle":string,"bio":string,"start":string}]}`
+        },
+        { role: 'user', content: piece }
+      ]
+    });
+    const list = (Array.isArray(out) ? out : out.characters || []).filter((c) => c?.name);
+    const located = list
+      .map((c) => ({ ...c, at: findLoose(piece, c.start || c.name) }))
+      .filter((c) => c.at >= 0)
+      .sort((a, b) => a.at - b.at);
+    located.forEach((c, i) => {
+      const end = i + 1 < located.length ? located[i + 1].at : piece.length;
+      result.push({ name: c.name, handle: makeHandle(c.handle || c.name), bio: c.bio || '', description: piece.slice(c.at, end).trim() });
+    });
+    if (!located.length) result.push(...splitCharactersFree(piece));
+  }
+  return result;
+}
+
+function findLoose(haystack, needle = '') {
+  const exact = haystack.indexOf(needle);
+  if (exact >= 0) return exact;
+  const words = needle.split(/\s+/).filter(Boolean).slice(0, 6).map(escapeRe);
+  if (!words.length) return -1;
+  const m = haystack.match(new RegExp(words.join('[\\s*_#:\\-]+'), 'i'));
+  return m ? m.index : -1;
+}
+
+// ---------------------------------------------------------------------------
+// World tick: the world moves on. One batched request for posts, replies, DMs, follows and drama.
+// ---------------------------------------------------------------------------
+
+function recentFeed(worldId) {
+  const roots = db
+    .prepare(
+      `SELECT p.id, p.content, p.likes, c.handle, c.kind, (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replies
+       FROM posts p JOIN characters c ON c.id = p.character_id WHERE p.world_id = ? AND p.parent_id IS NULL ORDER BY p.id DESC LIMIT 14`
+    )
+    .all(worldId)
+    .reverse();
+  const replies = db
+    .prepare(
+      `SELECT p.id, p.parent_id, p.content, c.handle, c.kind FROM posts p JOIN characters c ON c.id = p.character_id
+       WHERE p.world_id = ? AND p.parent_id IS NOT NULL ORDER BY p.id DESC LIMIT 10`
+    )
+    .all(worldId)
+    .reverse();
+  return { roots, replies };
+}
+
+/** Picks who acts this tick: people in hot storylines are more likely to show up. */
+function pickActors(worldId, pool, n) {
+  const hot = new Set(
+    db
+      .prepare("SELECT involved FROM storylines WHERE world_id = ? AND status = 'active' ORDER BY heat DESC LIMIT 4")
+      .all(worldId)
+      .flatMap((s) => JSON.parse(s.involved || '[]'))
+  );
+  const inStory = sample(pool.filter((c) => hot.has(c.id)), Math.ceil(n / 2));
+  const rest = sample(pool.filter((c) => !inStory.includes(c)), n - inStory.length);
+  return [...inStory, ...rest];
+}
+
+/** Maps a post id (root or reply) to the root id of its thread, within this world only. */
+function rootOf(worldId, id) {
+  if (id == null) return null;
+  const p = db.prepare('SELECT id, parent_id FROM posts WHERE id = ? AND world_id = ?').get(Number(id), worldId);
+  return p ? p.parent_id || p.id : null;
+}
+
+const humanTag = (p) => `@${p.handle}${p.kind === 'player' ? ' (HUMAN)' : ''}`;
+
+export async function worldTick(worldId, { count = 5, topic = '', allowDm } = {}) {
+  const s = getSettings();
   const world = getWorld(worldId);
   count = Math.max(1, Math.min(20, Number(count) || 5));
   const pool = aiCharacters(worldId);
   if (!pool.length) throw httpError(400, 'No active AI characters in this world. Create or generate some first.');
-  const authors = sample(pool, Math.min(pool.length, Math.max(3, Math.ceil(count * 0.8))));
-  const recent = recentPosts(worldId);
-  const lore = activateLore(
-    worldId,
-    [topic, ...authors.map((a) => `${a.name} ${a.persona}`), ...recent.slice(-6).map((p) => p.content)].join('\n')
-  );
+  const actors = pickActors(worldId, pool, Math.min(pool.length, Math.max(4, count + 2)));
+  const ps = personas(worldId);
+  const dmsAllowed = ps.length > 0 && (allowDm ?? Math.random() < s.dmChance);
+  const newUserAllowed = Math.random() < 0.15; // now and then someone new joins the platform
+  const { roots, replies } = recentFeed(worldId);
+
+  const state = worldContext(worldId, { focus: actors, others: ps, memoriesPer: 3 });
+  const lore = activateLore(worldId, [topic, state, ...actors.map((a) => a.name), ...roots.slice(-6).map((p) => p.content)].join('\n'));
+
+  const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null}],
+${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n' : ''}${newUserAllowed ? '"newUsers":[{"name":string,"handle":string,"bio":string,"description":string,"followers":number}],\n' : ''}"follows":[{"from":handle,"to":handle}],"unfollows":[{"from":handle,"to":handle}],
+"likes":[{"handle":string,"postId":number}],
+${UPDATES_SCHEMA}}`;
 
   const out = await completeJSON({
-    task: 'feed',
-    maxTokens: 160 * count + 200,
+    task: 'tick',
+    maxTokens: 200 * count + 900,
     temperature: 1,
     messages: [
       {
         role: 'system',
-        content: `${worldPreamble(world)}\nYou simulate the social-media feed of this world. Write posts in each user's own voice, grounded in the lore and in-world events. Vary length and mood: news, gossip, jokes, complaints, arguments, life updates. Posts can reply to recent posts by id. Never break the fourth wall.
-Return ONLY JSON: {"posts":[{"handle":string,"content":string,"replyTo":number|null}]}`
+        content: `${worldPreamble(world)}
+You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = a post id from the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
+${dmsAllowed ? '"dms": optionally 0-2 private messages from NPCs to the human\'s personas, only when motivated (drama, relationships, something the human did, flirting, threats, gossip).' : ''}
+${newUserAllowed ? '"newUsers": optionally 0-1 brand-new account joining the platform because of current events (a new user may also post in this same response using their handle).' : ''}
+"follows"/"unfollows"/"likes": realistic social reactions (people unfollow after drama, follow after viral posts, like posts they agree with).
+${UPDATES_RULES}
+Return ONLY JSON: ${schema}`
       },
       {
         role: 'user',
-        content: [
+        content: join([
           lore.text && `RELEVANT LORE:\n${lore.text}`,
-          `USERS WHO MAY POST:\n${authors.map((a) => characterCard(a, { brief: true })).join('\n\n')}`,
-          recent.length && `RECENT FEED:\n${recent.map((p) => `#${p.id} @${p.handle}: ${clip(p.content, 200)}`).join('\n')}`,
-          `Write ${count} new posts.${topic ? ` Topic / event: ${topic}` : ''}`
-        ]
-          .filter(Boolean)
-          .join('\n\n')
+          state && `WORLD STATE (hidden from users):\n${state}`,
+          `NPCs WHO MAY ACT NOW:\n${actors.map((a) => characterCard(a, { brief: true })).join('\n\n')}`,
+          personaBlock(ps),
+          newUserAllowed && npcRules(world),
+          roots.length && `RECENT FEED:\n${roots.map((p) => `#${p.id} ${humanTag(p)} [${p.likes} likes, ${p.replies} replies]: ${clip(p.content, 220)}`).join('\n')}`,
+          replies.length && `RECENT REPLIES:\n${replies.map((r) => `#${r.id} (on #${r.parent_id}) ${humanTag(r)}: ${clip(r.content, 160)}`).join('\n')}`,
+          `Write ${count} posts/replies now.${topic ? ` Current event/topic: ${topic}` : ''}`
+        ])
       }
     ]
   });
 
-  const find = byHandle(authors);
-  const validIds = new Set(recent.map((p) => p.id));
+  const allowed = new Set(pool.map((c) => c.id));
+  const aliases = new Map(); // handle the model used -> the account actually created
+  if (newUserAllowed) {
+    for (const u of arr(out.newUsers).slice(0, 1)) {
+      if (u?.name && !db.prepare('SELECT 1 FROM characters WHERE world_id = ? AND lower(name) = lower(?)').get(worldId, u.name)) {
+        const c = insertCharacter(worldId, { ...u, kind: 'generated' });
+        allowed.add(c.id);
+        aliases.set(makeHandle(u.handle || u.name), c);
+      }
+    }
+  }
+  const resolve = resolver(worldId);
+  const find = (h) => aliases.get(makeHandle(String(h ?? ''))) || resolve(h);
   const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes) VALUES (?, ?, ?, ?, ?)');
   const created = [];
-  for (const p of (Array.isArray(out) ? out : out.posts || []).slice(0, count)) {
-    const author = find(p.handle) || authors[created.length % authors.length];
-    if (!p.content) continue;
-    const parent = validIds.has(Number(p.replyTo)) ? Number(p.replyTo) : null;
-    created.push(ins.run(worldId, author.id, parent, String(p.content).trim(), randomLikes()).lastInsertRowid);
+  for (const p of arr(out.posts).slice(0, count)) {
+    const author = find(p?.handle);
+    if (!author || !allowed.has(author.id) || !p.content) continue; // never as a persona
+    const parent = rootOf(worldId, p.replyTo);
+    const id = Number(ins.run(worldId, author.id, parent, String(p.content).trim(), parent ? 0 : Math.floor(Math.random() * 20)).lastInsertRowid);
+    notifyForPost(worldId, id);
+    created.push(id);
   }
-  return created;
+
+  let dms = 0;
+  if (dmsAllowed) {
+    const { deliverDm } = await import('./chat.js');
+    for (const d of arr(out.dms).slice(0, 2)) {
+      const from = find(d?.from), to = find(d?.to);
+      if (!from || !to || !allowed.has(from.id) || to.kind !== 'player' || !d.content) continue;
+      deliverDm(worldId, from, to, String(d.content).trim());
+      dms++;
+    }
+  }
+
+  applyUpdates(worldId, { ...(out.updates || {}), follows: out.follows, unfollows: out.unfollows, likes: out.likes }, 'feed');
+  simulateEngagement(worldId);
+  db.prepare('UPDATE worlds SET last_tick_at = CURRENT_TIMESTAMP WHERE id = ?').run(worldId);
+  return { created, dms };
 }
 
-/** AI characters reply to a post thread, again in one batched request. */
-export async function generateReplies(postId, { count = 2 } = {}) {
+// ---------------------------------------------------------------------------
+// Thread replies
+// ---------------------------------------------------------------------------
+
+const lastThreadGen = new Map();
+
+/** Decides whether opening a thread should make new replies appear (random, with a cooldown). */
+export function rollViewReplies(postId) {
+  const s = getSettings();
   const root = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
-  if (!root) throw httpError(404, 'Post not found');
+  if (!root || !aiCharacters(root.world_id).length) return false;
+  if (Date.now() - (lastThreadGen.get(root.id) || 0) < 3 * 60_000) return false;
+  const lastReply = db
+    .prepare('SELECT c.kind FROM posts p JOIN characters c ON c.id = p.character_id WHERE p.parent_id = ? ORDER BY p.id DESC LIMIT 1')
+    .get(root.id);
+  // a human reply nobody has answered yet makes a response more likely
+  const chance = lastReply?.kind === 'player' ? Math.min(1, s.viewReplyChance * 2) : s.viewReplyChance;
+  const yes = Math.random() < chance;
+  if (!yes) lastThreadGen.set(root.id, Date.now()); // don't re-roll on every open
+  return yes;
+}
+
+/**
+ * AI characters reply to a thread in one batched request.
+ * humanReplyId: set when the user just replied, so someone answers them directly.
+ */
+export async function generateReplies(postId, { count, humanReplyId } = {}) {
+  const first = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
+  if (!first) throw httpError(404, 'Post not found');
+  const root = first.parent_id ? db.prepare('SELECT * FROM posts WHERE id = ?').get(first.parent_id) : first;
   const world = getWorld(root.world_id);
+  lastThreadGen.set(root.id, Date.now());
+  count = Number(count) || 2 + Math.floor(Math.random() * 3);
+
   const thread = db
     .prepare(
-      `SELECT p.id, p.content, c.handle, c.name, c.id AS cid FROM posts p JOIN characters c ON c.id = p.character_id
+      `SELECT p.id, p.content, p.character_id, c.handle, c.name, c.kind FROM posts p JOIN characters c ON c.id = p.character_id
        WHERE p.id = ? OR p.parent_id = ? ORDER BY p.id`
     )
-    .all(postId, postId);
+    .all(root.id, root.id);
+  const shown = thread.length > 26 ? [thread[0], ...thread.slice(-25)] : thread;
   const pool = aiCharacters(world.id);
   if (!pool.length) throw httpError(400, 'No active AI characters in this world.');
 
-  // People @mentioned in the thread reply first, then a random selection (not the original author).
-  const text = thread.map((t) => t.content).join('\n');
-  const mentioned = pool.filter((c) => new RegExp(`@${c.handle}\\b|\\b${c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text));
-  const others = sample(pool.filter((c) => c.id !== root.character_id && !mentioned.includes(c)), count);
-  const responders = [...new Set([...mentioned, ...others])].slice(0, Math.max(count, mentioned.length));
-  if (!responders.length) return [];
+  const human = humanReplyId ? thread.find((t) => t.id === Number(humanReplyId)) : null;
+  const text = shown.map((t) => t.content).join('\n');
+  const mentioned = pool.filter((c) => new RegExp(`@${escapeRe(c.handle)}\\b|\\b${escapeRe(c.name)}\\b`, 'i').test(human ? human.content : text));
+  const participants = pool.filter((c) => thread.some((t) => t.character_id === c.id));
+  const op = pool.find((c) => c.id === root.character_id);
+  const lastAuthor = thread[thread.length - 1]?.character_id;
+  // OP defends their post, people who were called out answer back, plus some newcomers
+  const core = [...new Set([...mentioned, ...(op && op.id !== lastAuthor ? [op] : []), ...sample(participants, 2)])];
+  const newcomers = sample(pool.filter((c) => !core.includes(c)), Math.max(1, count - core.length));
+  const responders = [...core, ...newcomers].slice(0, Math.max(count, mentioned.length + 1));
 
-  const lore = activateLore(world.id, `${text}\n${responders.map((r) => r.name).join(' ')}`);
+  const ps = personas(world.id);
+  const humansHere = ps.filter((p) => thread.some((t) => t.character_id === p.id));
+  const state = worldContext(world.id, { focus: responders, others: humansHere, memoriesPer: 3 });
+  const lore = activateLore(world.id, `${text}\n${responders.map((r) => r.name).join(' ')}`, undefined, { boost: responders.map((r) => r.name) });
+
   const out = await completeJSON({
     task: 'replies',
-    maxTokens: 140 * responders.length + 150,
+    maxTokens: 170 * count + 600,
     temperature: 0.95,
     messages: [
       {
         role: 'system',
-        content: `${worldPreamble(world)}\nYou write replies in a social-media thread in this world, each in the replying user's own voice and consistent with the lore. Replies are short and react to the thread (agree, argue, joke, add info).
-Return ONLY JSON: {"replies":[{"handle":string,"content":string}]}`
+        content: `${worldPreamble(world)}
+You write the next replies in a social-media thread, each in the replying user's own voice and consistent with the lore, their memories and relationships. React to the thread: agree, argue, dunk, joke, bring receipts, escalate drama. The same user may reply more than once if they're arguing. Address specific people with @handle.
+${UPDATES_RULES}
+Return ONLY JSON: {"replies":[{"handle":string,"content":string}],"likes":[{"handle":string,"postId":number}],${UPDATES_SCHEMA}}`
       },
       {
         role: 'user',
-        content: [
+        content: join([
           lore.text && `RELEVANT LORE:\n${lore.text}`,
-          `REPLYING USERS:\n${responders.map((r) => characterCard(r, { brief: true })).join('\n\n')}`,
-          `THREAD:\n${thread.map((t) => `@${t.handle}: ${t.content}`).join('\n')}`,
-          `Write one reply for each replying user (${responders.map((r) => '@' + r.handle).join(', ')}).`
-        ]
-          .filter(Boolean)
-          .join('\n\n')
+          state && `WORLD STATE (hidden from users):\n${state}`,
+          `USERS WHO CAN REPLY:\n${responders.map((r) => characterCard(r, { brief: true })).join('\n\n')}`,
+          personaBlock(humansHere),
+          `THREAD:\n${shown.map((t) => `#${t.id} ${humanTag(t)}: ${t.content}`).join('\n')}`,
+          human
+            ? `The human (@${human.handle}) just replied (#${human.id}). At least one reply must respond directly to them. Write ${count} replies.`
+            : `Write ${count} new replies.`
+        ])
       }
     ]
   });
-  const find = byHandle(responders);
+
+  const find = resolver(world.id);
+  const allowed = new Set(responders.map((r) => r.id));
   const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes) VALUES (?, ?, ?, ?, ?)');
-  return (Array.isArray(out) ? out : out.replies || [])
-    .filter((r) => r?.content && find(r.handle))
-    .map((r) => ins.run(world.id, find(r.handle).id, postId, String(r.content).trim(), randomLikes()).lastInsertRowid);
-}
-
-// ---------------------------------------------------------------------------
-// Chat
-// ---------------------------------------------------------------------------
-
-export function conversationMembers(convId) {
-  return db
-    .prepare('SELECT c.* FROM conversation_members m JOIN characters c ON c.id = m.character_id WHERE m.conversation_id = ?')
-    .all(convId);
-}
-
-/** Picks who should talk next: someone named in the last message, otherwise whoever has been quiet longest. */
-export function pickResponder(convId) {
-  const members = conversationMembers(convId).filter((m) => m.kind !== 'player');
-  if (!members.length) throw httpError(400, 'This conversation has no AI characters.');
-  if (members.length === 1) return members[0];
-  const last = db.prepare('SELECT * FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1').get(convId);
-  if (last) {
-    const named = members.find(
-      (m) => m.id !== last.character_id && (last.content.toLowerCase().includes(m.name.toLowerCase().split(' ')[0]) || last.content.includes('@' + m.handle))
-    );
-    if (named) return named;
+  const created = [];
+  for (const r of arr(out.replies).slice(0, count + 2)) {
+    const c = find(r?.handle);
+    if (!c || !allowed.has(c.id) || !r.content) continue;
+    const id = Number(ins.run(world.id, c.id, root.id, String(r.content).trim(), Math.floor(Math.random() ** 2 * 60)).lastInsertRowid);
+    notifyForPost(world.id, id);
+    created.push(id);
   }
-  const lastSpoke = (m) => db.prepare('SELECT MAX(id) AS id FROM messages WHERE conversation_id = ? AND character_id = ?').get(convId, m.id)?.id || 0;
-  return members.filter((m) => !last || m.id !== last.character_id).sort((a, b) => lastSpoke(a) - lastSpoke(b))[0] || members[0];
-}
-
-function buildChatPrompt(conv, speaker) {
-  const s = getSettings();
-  const world = getWorld(conv.world_id);
-  const members = conversationMembers(conv.id);
-  const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
-  const others = members.filter((m) => m.id !== speaker.id);
-  const history = db
-    .prepare(
-      `SELECT m.*, c.name FROM messages m LEFT JOIN characters c ON c.id = m.character_id
-       WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id DESC LIMIT ?`
-    )
-    .all(conv.id, conv.summarized_upto, s.recentMessages)
-    .reverse();
-
-  const scan = [
-    ...history.slice(-s.scanDepth).map((m) => m.content),
-    speaker.name,
-    ...others.map((o) => o.name)
-  ].join('\n');
-  const lore = activateLore(conv.world_id, scan);
-
-  // Stable block first (cache-friendly), dynamic lore and summary after it.
-  const stable = [
-    worldPreamble(world),
-    `You are ${speaker.name}. Stay in character at all times.`,
-    `YOUR CHARACTER:\n${characterCard(speaker)}`,
-    player && `YOU ARE TALKING WITH (played by the user):\n${characterCard(player, { brief: true })}`,
-    others.filter((o) => o.id !== player?.id).length &&
-      `ALSO IN THIS CHAT:\n${others.filter((o) => o.id !== player?.id).map((o) => characterCard(o, { brief: true })).join('\n\n')}`,
-    `This is a private message conversation on the world's social network. Write only ${speaker.name}'s next message: no name prefix, never write lines for anyone else. Match your voice; keep it conversational and reasonably short unless the moment calls for more.`
-  ]
-    .filter(Boolean)
-    .join('\n\n');
-
-  const dynamic = [lore.text && `RELEVANT LORE:\n${lore.text}`, conv.summary && `EARLIER IN THIS CONVERSATION:\n${conv.summary}`]
-    .filter(Boolean)
-    .join('\n\n');
-
-  const messages = [{ role: 'system', content: stable }];
-  if (dynamic) messages.push({ role: 'system', content: dynamic });
-  for (const m of history) {
-    const role = m.character_id === speaker.id ? 'assistant' : 'user';
-    const content = role === 'assistant' ? m.content : `${m.name || (m.is_player ? 'User' : 'Someone')}: ${m.content}`;
-    const prev = messages[messages.length - 1];
-    if (prev.role === role && role === 'user') prev.content += `\n${content}`;
-    else messages.push({ role, content });
-  }
-  if (messages[messages.length - 1].role !== 'user') {
-    messages.push({ role: 'user', content: `(Continue the conversation as ${speaker.name}.)` });
-  }
-  return { messages, lore };
-}
-
-export async function streamReply(convId, { characterId, onToken, onMeta, signal }) {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(convId);
-  if (!conv) throw httpError(404, 'Conversation not found');
-  const speaker = characterId ? db.prepare('SELECT * FROM characters WHERE id = ?').get(characterId) : pickResponder(convId);
-  const { messages, lore } = buildChatPrompt(conv, speaker);
-  onMeta?.({
-    speaker: { id: speaker.id, name: speaker.name, handle: speaker.handle, color: speaker.color },
-    lore: lore.entries.map((e) => e.title),
-    promptTokens: estimateTokens(messages.map((m) => m.content).join('\n'))
-  });
-
-  const raw = await stream({ task: 'chat', messages, onToken, signal });
-  const text = cleanReply(raw, [speaker, ...conversationMembers(convId)], conv.player_id);
-  if (!text) throw httpError(502, 'The model returned an empty reply.');
-  const r = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 0, ?)').run(convId, speaker.id, text);
-  maybeSummarize(convId).catch((e) => console.error('summary failed:', e.message));
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid);
-}
-
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/** Strips a leading "Name:" and cuts the reply where the model starts writing lines for someone else. */
-function cleanReply(text, members, playerId) {
-  const player = playerId ? db.prepare('SELECT name FROM characters WHERE id = ?').get(playerId) : null;
-  const names = [...new Set([...members.map((m) => m.name), player?.name, 'User', 'You'].filter(Boolean))];
-  const alt = names.map(escapeRe).join('|');
-  let out = text.replace(new RegExp(`^\\s*\\**(?:${alt})\\**\\s*:\\s*`, 'i'), '');
-  const cut = out.search(new RegExp(`\\n\\s*\\**(?:${alt})\\**\\s*:`, 'i'));
-  if (cut > 0) out = out.slice(0, cut);
-  return out.trim();
-}
-
-/** Folds older messages into a rolling summary so the prompt doesn't grow forever. */
-async function maybeSummarize(convId) {
-  const s = getSettings();
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(convId);
-  const pending = db
-    .prepare(
-      `SELECT m.*, c.name FROM messages m LEFT JOIN characters c ON c.id = m.character_id
-       WHERE m.conversation_id = ? AND m.id > ? ORDER BY m.id`
-    )
-    .all(convId, conv.summarized_upto);
-  // Batch summaries: wait until there is a meaningful chunk to fold (fewer, cheaper calls).
-  if (pending.length < s.recentMessages + 8) return;
-  const fold = pending.slice(0, pending.length - s.recentMessages);
-  const summary = await complete({
-    task: 'chat-summary',
-    maxTokens: 450,
-    temperature: 0.2,
-    messages: [
-      {
-        role: 'system',
-        content:
-          'Update the running summary of a roleplay conversation. Keep important facts, decisions, promises, relationship changes, and emotional beats. Max 250 words, past tense, third person.'
-      },
-      {
-        role: 'user',
-        content: `CURRENT SUMMARY:\n${conv.summary || '(none)'}\n\nNEW MESSAGES:\n${fold.map((m) => `${m.name || (m.is_player ? 'User' : 'Someone')}: ${m.content}`).join('\n')}`
-      }
-    ]
-  });
-  db.prepare('UPDATE conversations SET summary = ?, summarized_upto = ? WHERE id = ?').run(summary.trim(), fold[fold.length - 1].id, convId);
+  applyUpdates(world.id, { ...(out.updates || {}), likes: out.likes }, 'thread');
+  return created;
 }

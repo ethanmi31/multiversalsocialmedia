@@ -40,3 +40,30 @@ export const timeAgo = (iso) => {
   if (s < 86400) return `${Math.round(s / 3600)}h`;
   return `${Math.round(s / 86400)}d`;
 };
+
+export const fmtCount = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n || 0));
+
+/** Post/message text with clickable @handles (only for characters in the current universe). */
+export function RichText({ text, chars = [], openProfile }) {
+  const byHandle = new Map(chars.map((c) => [c.handle.toLowerCase(), c]));
+  // same tolerance as the server: "@kael" finds @kael_storm when unambiguous
+  const find = (h) => {
+    const key = h.toLowerCase();
+    if (byHandle.has(key)) return byHandle.get(key);
+    const hits = key.length >= 3 ? chars.filter((c) => c.handle.toLowerCase().startsWith(key) || c.name.toLowerCase().split(/\s+/)[0] === key) : [];
+    return hits.length === 1 ? hits[0] : null;
+  };
+  const parts = String(text).split(/(@[A-Za-z0-9_]+)/g);
+  return (
+    <>
+      {parts.map((p, i) => {
+        const c = p.startsWith('@') && find(p.slice(1));
+        return c ? <a key={i} className="mention" onClick={(e) => { e.stopPropagation(); openProfile?.(c.id); }}>{p}</a> : p;
+      })}
+    </>
+  );
+}
+
+export function Typing({ label = 'Someone is typing' }) {
+  return <div className="typing-ind small muted">{label}<span className="dots"><i /><i /><i /></span></div>;
+}

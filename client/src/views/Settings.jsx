@@ -10,7 +10,14 @@ const NUMBERS = [
   ['recentMessages', 'Recent messages kept verbatim', 'Older messages are folded into a rolling summary by the utility model.'],
   ['maxReplyTokens', 'Max reply length (tokens)', 'Caps the length of each chat reply.'],
   ['temperature', 'Temperature', 'Higher = more creative, lower = more consistent.'],
-  ['compileChunkTokens', 'Compile chunk size (tokens)', 'Document chunk size for AI compile. Bigger chunks = fewer calls but the model may skip details.']
+  ['compileChunkTokens', 'Compile chunk size (tokens)', 'Document chunk size for AI compile. Bigger chunks = fewer calls but the model may skip details.'],
+  ['worldStateBudget', 'World-state budget (tokens)', 'Max tokens of storylines, relationships and memories injected per request.']
+];
+
+const LIVENESS = [
+  ['dmChance', 'Chance of DMs per tick (0–1)', 'How likely characters are to slide into your DMs each time time passes.'],
+  ['viewReplyChance', 'Chance of new replies when opening a thread (0–1)', 'Doubles if your reply there is still unanswered. 3-minute cooldown per thread.'],
+  ['awayTickMinutes', 'Catch-up after being away (minutes)', 'Opening the feed after this long runs one "while you were away" tick. 0 = off.']
 ];
 
 export default function Settings({ settings, notify, onSaved }) {
@@ -65,6 +72,31 @@ export default function Settings({ settings, notify, onSaved }) {
               <span className="muted small">{hint}</span>
             </label>
           ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Liveness</h2>
+        <div className="grid2">
+          {LIVENESS.map(([k, label, hint]) => (
+            <label key={k}>{label}
+              <input type="number" step={k === 'awayTickMinutes' ? 5 : 0.05} min={0} value={s[k]} onChange={set(k)} />
+              <span className="muted small">{hint}</span>
+            </label>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Global style guide</h2>
+        <p className="muted small">
+          Engine instructions sent with every request in every universe (kept first so providers can cache it). Put story-specific rules in
+          each universe's <i>World rules</i> instead, so they never leak into other universes.
+        </p>
+        <textarea rows={14} value={s.styleGuide} onChange={set('styleGuide')} />
+        <div className="row space small">
+          <span className="muted">~{Math.ceil((s.styleGuide || '').length / 4)} tokens per request</span>
+          <button className="link" onClick={() => setS({ ...s, styleGuide: settings.defaultStyleGuide })}>Reset to default</button>
         </div>
       </section>
 

@@ -3,6 +3,7 @@ import { api, fmtCost, fmtNum } from '../api.js';
 
 const TASKS = {
   chat: 'Chat replies', compile: 'Lore compile', summary: 'World summary', 'chat-summary': 'Chat memory',
+  tick: 'World ticks (feed, DMs, drama)', scene: 'Real-life scenes', observe: 'Continuity tracking', 'import-characters': 'Character import',
   feed: 'Feed posts', replies: 'Post replies', 'generate-users': 'Generate users', 'draft-character': 'Draft character'
 };
 

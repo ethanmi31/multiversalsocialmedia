@@ -7,8 +7,11 @@ import {
   extractText, parseSillyTavernLorebook, insertEntries, startCompile, getJob, estimateCompile, summarizeWorld, activateLore
 } from './lorebook.js';
 import {
-  generateCharacters, draftCharacter, generateFeed, generateReplies, streamReply, insertCharacter, conversationMembers, pickResponder
+  generateCharacters, draftCharacter, worldTick, generateReplies, rollViewReplies, insertCharacter, uniqueHandle,
+  splitCharactersFree, splitCharactersAI
 } from './engine.js';
+import { conversationMembers, pickResponder, streamReply, observeConversation, findOrCreateDm } from './chat.js';
+import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
 
 const app = express();
@@ -16,13 +19,31 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 
 app.use(express.json({ limit: '50mb' }));
 
 const api = express.Router();
-const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const id = (v) => Number(v);
+
+// ---------------------------------------------------------------- universe isolation guards
+function character(cid, worldId) {
+  const c = db.prepare('SELECT * FROM characters WHERE id = ?').get(id(cid));
+  if (!c) throw httpError(404, 'Character not found');
+  if (worldId != null && c.world_id !== id(worldId)) throw httpError(400, 'That character belongs to a different universe.');
+  return c;
+}
+function post(pid, worldId) {
+  const p = db.prepare('SELECT * FROM posts WHERE id = ?').get(id(pid));
+  if (!p) throw httpError(404, 'Post not found');
+  if (worldId != null && p.world_id !== id(worldId)) throw httpError(400, 'That post belongs to a different universe.');
+  return p;
+}
+function conversation(cid) {
+  const c = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id(cid));
+  if (!c) throw httpError(404, 'Conversation not found');
+  return c;
+}
 
 // ---------------------------------------------------------------- settings
 api.get('/settings', (req, res) => {
   const s = getSettings();
-  res.json({ ...s, apiKey: undefined, hasApiKey: !!s.apiKey, apiKeyHint: s.apiKey ? `…${s.apiKey.slice(-4)}` : '' });
+  res.json({ ...s, apiKey: undefined, hasApiKey: !!s.apiKey, apiKeyHint: s.apiKey ? `…${s.apiKey.slice(-4)}` : '', defaultStyleGuide: DEFAULT_SETTINGS.styleGuide });
 });
 api.put('/settings', (req, res) => {
   const patch = { ...req.body };
@@ -33,7 +54,7 @@ api.put('/settings', (req, res) => {
   saveSettings(patch);
   res.json({ ok: true });
 });
-api.get('/models', wrap(async (req, res) => res.json(await listModels())));
+api.get('/models', async (req, res) => res.json(await listModels()));
 
 api.get('/usage', (req, res) => {
   const totals = db
@@ -47,10 +68,19 @@ api.delete('/usage', (req, res) => {
   res.json({ ok: true });
 });
 
+/** Extracts plain text from an uploaded file (used for dropping character descriptions in). */
+api.post('/extract', upload.single('file'), async (req, res) => {
+  if (!req.file) throw httpError(400, 'No file uploaded');
+  res.json({ text: await extractText(req.file) });
+});
+
 // ---------------------------------------------------------------- worlds
 const worldStats = `(SELECT COUNT(*) FROM lore_entries l WHERE l.world_id = w.id) AS loreCount,
   (SELECT COUNT(*) FROM characters c WHERE c.world_id = w.id) AS characterCount,
   (SELECT COUNT(*) FROM posts p WHERE p.world_id = w.id) AS postCount,
+  (SELECT COUNT(*) FROM notifications n WHERE n.world_id = w.id AND n.read = 0) AS unreadNotifications,
+  (SELECT COALESCE(SUM(unread), 0) FROM conversations v WHERE v.world_id = w.id) AS unreadMessages,
+  CAST((julianday('now') - julianday(COALESCE(w.last_tick_at, w.created_at))) * 1440 AS INTEGER) AS minutesSinceTick,
   length(w.source_text) AS sourceChars`;
 
 api.get('/worlds', (req, res) => {
@@ -65,11 +95,10 @@ api.get('/worlds/:id', (req, res) => {
   const w = db.prepare(`SELECT w.*, ${worldStats} FROM worlds w WHERE w.id = ?`).get(id(req.params.id));
   if (!w) throw httpError(404, 'World not found');
   w.sourceTokens = estimateTokens(w.source_text);
-  w.summaryTokens = estimateTokens(w.summary) + estimateTokens(w.rules);
   res.json(w);
 });
 api.put('/worlds/:id', (req, res) => {
-  const fields = ['name', 'description', 'summary', 'rules', 'instructions', 'source_text', 'source_name'];
+  const fields = ['name', 'description', 'summary', 'rules', 'instructions', 'npc_instructions', 'source_text', 'source_name'];
   for (const f of fields) {
     if (f in req.body) db.prepare(`UPDATE worlds SET ${f} = ? WHERE id = ?`).run(String(req.body[f] ?? ''), id(req.params.id));
   }
@@ -81,7 +110,7 @@ api.delete('/worlds/:id', (req, res) => {
 });
 
 /** Upload a document (txt/md/docx/pdf) as the world's source, or a SillyTavern lorebook JSON to import directly. */
-api.post('/worlds/:id/document', upload.single('file'), wrap(async (req, res) => {
+api.post('/worlds/:id/document', upload.single('file'), async (req, res) => {
   if (!req.file) throw httpError(400, 'No file uploaded');
   const worldId = id(req.params.id);
   const text = await extractText(req.file);
@@ -98,13 +127,13 @@ api.post('/worlds/:id/document', upload.single('file'), wrap(async (req, res) =>
   const name = append && w.source_name ? `${w.source_name}, ${req.file.originalname}` : req.file.originalname;
   db.prepare('UPDATE worlds SET source_text = ?, source_name = ? WHERE id = ?').run(source, name, worldId);
   res.json({ kind: 'document', chars: source.length, tokens: estimateTokens(source) });
-}));
+});
 
-api.get('/worlds/:id/compile/estimate', wrap(async (req, res) => {
+api.get('/worlds/:id/compile/estimate', async (req, res) => {
   const w = db.prepare('SELECT * FROM worlds WHERE id = ?').get(id(req.params.id));
   if (!w) throw httpError(404, 'World not found');
   res.json(await estimateCompile(w));
-}));
+});
 api.post('/worlds/:id/compile', (req, res) => {
   res.json(startCompile(id(req.params.id), { mode: req.body.mode, replace: req.body.replace !== false }));
 });
@@ -113,7 +142,7 @@ api.get('/jobs/:id', (req, res) => {
   if (!job) throw httpError(404, 'Job not found');
   res.json(job);
 });
-api.post('/worlds/:id/summarize', wrap(async (req, res) => res.json({ summary: await summarizeWorld(id(req.params.id)) })));
+api.post('/worlds/:id/summarize', async (req, res) => res.json({ summary: await summarizeWorld(id(req.params.id)) }));
 
 // ---------------------------------------------------------------- lore entries
 const parseEntry = (e) => ({ ...e, keys: JSON.parse(e.keys || '[]'), constant: !!e.constant, enabled: !!e.enabled });
@@ -143,7 +172,6 @@ api.delete('/lore/:id', (req, res) => {
   db.prepare('DELETE FROM lore_entries WHERE id = ?').run(id(req.params.id));
   res.json({ ok: true });
 });
-/** Preview which entries a piece of text would trigger, and how many tokens that costs. */
 api.post('/worlds/:id/lore/test', (req, res) => {
   const r = activateLore(id(req.params.id), req.body.text || '');
   res.json({ tokens: r.tokens, entries: r.entries.map((e) => ({ id: e.id, title: e.title, tokens: e.tokens, constant: !!e.constant })) });
@@ -158,24 +186,101 @@ api.get('/worlds/:id/lore/export', (req, res) => {
   res.json(out);
 });
 
+// ---------------------------------------------------------------- world state ("system update")
+api.get('/worlds/:id/state', (req, res) => {
+  const wid = id(req.params.id);
+  const names = new Map(db.prepare('SELECT id, name, handle FROM characters WHERE world_id = ?').all(wid).map((c) => [c.id, c]));
+  const storylines = db.prepare('SELECT * FROM storylines WHERE world_id = ? ORDER BY status, heat DESC, updated_at DESC').all(wid)
+    .map((s) => ({ ...s, involved: JSON.parse(s.involved || '[]').map((i) => names.get(i)).filter(Boolean) }));
+  const relationships = db.prepare('SELECT * FROM relationships WHERE world_id = ? ORDER BY updated_at DESC LIMIT 200').all(wid)
+    .map((r) => ({ ...r, from: names.get(r.from_id), to: names.get(r.to_id) }));
+  res.json({ storylines, relationships });
+});
+api.put('/storylines/:id', (req, res) => {
+  const { title, summary, status, heat } = req.body;
+  db.prepare('UPDATE storylines SET title = ?, summary = ?, status = ?, heat = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(title, summary, status === 'resolved' ? 'resolved' : 'active', Number(heat) || 0, id(req.params.id));
+  res.json({ ok: true });
+});
+api.post('/worlds/:id/storylines', (req, res) => {
+  db.prepare('INSERT INTO storylines (world_id, title, summary, heat) VALUES (?, ?, ?, ?)').run(id(req.params.id), req.body.title || 'New storyline', req.body.summary || '', Number(req.body.heat) || 60);
+  res.json({ ok: true });
+});
+api.delete('/storylines/:id', (req, res) => {
+  db.prepare('DELETE FROM storylines WHERE id = ?').run(id(req.params.id));
+  res.json({ ok: true });
+});
+api.delete('/relationships/:from/:to', (req, res) => {
+  db.prepare('DELETE FROM relationships WHERE from_id = ? AND to_id = ?').run(id(req.params.from), id(req.params.to));
+  res.json({ ok: true });
+});
+api.delete('/memories/:id', (req, res) => {
+  db.prepare('DELETE FROM memories WHERE id = ?').run(id(req.params.id));
+  res.json({ ok: true });
+});
+
 // ---------------------------------------------------------------- characters
+const CHAR_FIELDS = ['kind', 'name', 'handle', 'bio', 'persona', 'style', 'color', 'active', 'followers'];
+
 api.get('/worlds/:id/characters', (req, res) => {
-  res.json(db.prepare("SELECT * FROM characters WHERE world_id = ? ORDER BY kind = 'player' DESC, kind = 'custom' DESC, name").all(id(req.params.id)));
+  res.json(
+    db.prepare("SELECT * FROM characters WHERE world_id = ? ORDER BY kind = 'player' DESC, kind = 'custom' DESC, name").all(id(req.params.id))
+      .map((c) => ({ ...c, followerCount: followerCount(c) }))
+  );
 });
 api.post('/worlds/:id/characters', (req, res) => {
   if (!req.body.name?.trim()) throw httpError(400, 'Name is required');
   res.json(insertCharacter(id(req.params.id), req.body));
 });
-api.post('/worlds/:id/characters/generate', wrap(async (req, res) => res.json(await generateCharacters(id(req.params.id), req.body))));
-api.post('/worlds/:id/characters/draft', wrap(async (req, res) => res.json(await draftCharacter(id(req.params.id), req.body))));
+api.post('/worlds/:id/characters/generate', async (req, res) => res.json(await generateCharacters(id(req.params.id), req.body)));
+api.post('/worlds/:id/characters/draft', async (req, res) => res.json(await draftCharacter(id(req.params.id), req.body)));
+
+/** Step 1 of bulk import: split pasted text into a preview list the user can edit. */
+api.post('/worlds/:id/characters/split', async (req, res) => {
+  const text = String(req.body.text || '');
+  if (!text.trim()) throw httpError(400, 'Paste or drop some character descriptions first.');
+  res.json(req.body.mode === 'ai' ? await splitCharactersAI(id(req.params.id), text) : splitCharactersFree(text));
+});
+/** Step 2: create the reviewed characters. */
+api.post('/worlds/:id/characters/import', (req, res) => {
+  const wid = id(req.params.id);
+  const list = (req.body.characters || []).filter((c) => c?.name?.trim());
+  res.json(list.map((c) => insertCharacter(wid, { ...c, persona: c.description ?? c.persona, kind: c.kind || req.body.kind || 'custom' })));
+});
+
 api.put('/characters/:id', (req, res) => {
-  for (const f of ['kind', 'name', 'handle', 'bio', 'persona', 'style', 'color', 'active']) {
-    if (f in req.body) db.prepare(`UPDATE characters SET ${f} = ? WHERE id = ?`).run(f === 'active' ? (req.body[f] ? 1 : 0) : String(req.body[f]), id(req.params.id));
+  const c = character(req.params.id);
+  for (const f of CHAR_FIELDS) {
+    if (!(f in req.body)) continue;
+    let v = req.body[f];
+    if (f === 'active') v = v ? 1 : 0;
+    else if (f === 'followers') v = Number(v) || 0;
+    else if (f === 'handle') v = uniqueHandle(c.world_id, v || req.body.name || c.name, c.id);
+    else v = String(v ?? '');
+    db.prepare(`UPDATE characters SET ${f} = ? WHERE id = ?`).run(v, c.id);
   }
-  res.json({ ok: true });
+  res.json(db.prepare('SELECT * FROM characters WHERE id = ?').get(c.id));
 });
 api.delete('/characters/:id', (req, res) => {
   db.prepare('DELETE FROM characters WHERE id = ?').run(id(req.params.id));
+  res.json({ ok: true });
+});
+
+api.get('/characters/:id/profile', (req, res) => {
+  const c = character(req.params.id);
+  const viewer = req.query.as ? character(req.query.as, c.world_id) : null;
+  const posts = db.prepare(`${postSelect} WHERE p.character_id = ? ORDER BY p.id DESC LIMIT 40`).all(c.id);
+  const following = db.prepare('SELECT COUNT(*) AS n FROM follows WHERE follower_id = ?').get(c.id).n;
+  const isFollowing = viewer ? !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(viewer.id, c.id) : false;
+  const followsYou = viewer ? !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(c.id, viewer.id) : false;
+  const memories = db.prepare('SELECT * FROM memories WHERE character_id = ? ORDER BY id DESC LIMIT 40').all(c.id);
+  res.json({ character: c, followers: followerCount(c), following, isFollowing, followsYou, posts, memories });
+});
+api.post('/characters/:id/follow', (req, res) => {
+  const target = character(req.params.id);
+  const me = character(req.body.personaId, target.world_id);
+  if (req.body.unfollow) db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(me.id, target.id);
+  else follow(target.world_id, me.id, target.id);
   res.json({ ok: true });
 });
 
@@ -189,58 +294,96 @@ api.get('/worlds/:id/posts', (req, res) => {
   res.json(db.prepare(`${postSelect} WHERE p.world_id = ? AND p.parent_id IS NULL AND p.id < ? ORDER BY p.id DESC LIMIT 30`).all(id(req.params.id), before));
 });
 api.get('/posts/:id', (req, res) => {
-  const post = db.prepare(`${postSelect} WHERE p.id = ?`).get(id(req.params.id));
-  if (!post) throw httpError(404, 'Post not found');
-  const replies = db.prepare(`${postSelect} WHERE p.parent_id = ? ORDER BY p.id`).all(post.id);
-  res.json({ post, replies });
+  const p = db.prepare(`${postSelect} WHERE p.id = ?`).get(id(req.params.id));
+  if (!p) throw httpError(404, 'Post not found');
+  const replies = db.prepare(`${postSelect} WHERE p.parent_id = ? ORDER BY p.id`).all(p.id);
+  res.json({ post: p, replies });
 });
+/** Opening a thread: should characters chime in right now? (random, with cooldown) */
+api.post('/posts/:id/view', (req, res) => res.json({ generate: rollViewReplies(post(req.params.id).id) }));
+
 api.post('/worlds/:id/posts', (req, res) => {
-  const { characterId, content, parentId = null } = req.body;
+  const wid = id(req.params.id);
+  const { characterId, content } = req.body;
   if (!content?.trim() || !characterId) throw httpError(400, 'Pick who is posting and write something.');
-  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content) VALUES (?, ?, ?, ?)').run(id(req.params.id), characterId, parentId, content.trim());
+  character(characterId, wid);
+  // replies always attach to the thread root
+  const parent = req.body.parentId ? post(req.body.parentId, wid) : null;
+  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content) VALUES (?, ?, ?, ?)').run(wid, characterId, parent ? parent.parent_id || parent.id : null, content.trim());
   res.json({ id: Number(r.lastInsertRowid) });
 });
 api.post('/posts/:id/like', (req, res) => {
-  db.prepare('UPDATE posts SET likes = likes + 1 WHERE id = ?').run(id(req.params.id));
+  const p = post(req.params.id);
+  if (req.body.personaId) like(p.world_id, p, character(req.body.personaId, p.world_id));
+  else db.prepare('UPDATE posts SET likes = likes + 1 WHERE id = ?').run(p.id);
   res.json({ ok: true });
 });
 api.delete('/posts/:id', (req, res) => {
   db.prepare('DELETE FROM posts WHERE id = ?').run(id(req.params.id));
   res.json({ ok: true });
 });
-api.post('/worlds/:id/feed/generate', wrap(async (req, res) => res.json({ created: (await generateFeed(id(req.params.id), req.body)).map(Number) })));
-api.post('/posts/:id/replies/generate', wrap(async (req, res) => res.json({ created: (await generateReplies(id(req.params.id), req.body)).map(Number) })));
+api.post('/worlds/:id/tick', async (req, res) => res.json(await worldTick(id(req.params.id), req.body)));
+api.post('/posts/:id/replies/generate', async (req, res) => res.json({ created: await generateReplies(post(req.params.id).id, req.body) }));
 
-// ---------------------------------------------------------------- conversations
+// ---------------------------------------------------------------- notifications
+api.get('/worlds/:id/notifications', (req, res) => {
+  res.json(
+    db.prepare(
+      `SELECT n.*, a.name AS actorName, a.handle AS actorHandle, a.color AS actorColor, p.content AS postContent, pe.handle AS personaHandle
+       FROM notifications n LEFT JOIN characters a ON a.id = n.actor_id LEFT JOIN posts p ON p.id = n.post_id LEFT JOIN characters pe ON pe.id = n.persona_id
+       WHERE n.world_id = ? ORDER BY n.id DESC LIMIT 100`
+    ).all(id(req.params.id))
+  );
+});
+api.post('/worlds/:id/notifications/read', (req, res) => {
+  db.prepare('UPDATE notifications SET read = 1 WHERE world_id = ?').run(id(req.params.id));
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- conversations (DMs and real-life scenes)
 api.get('/worlds/:id/conversations', (req, res) => {
   const convs = db
     .prepare(
       `SELECT v.*, (SELECT content FROM messages m WHERE m.conversation_id = v.id ORDER BY m.id DESC LIMIT 1) AS lastMessage
-       FROM conversations v WHERE v.world_id = ? ORDER BY (SELECT MAX(id) FROM messages m WHERE m.conversation_id = v.id) DESC, v.id DESC`
+       FROM conversations v WHERE v.world_id = ? AND v.kind = ?
+       ORDER BY COALESCE((SELECT MAX(id) FROM messages m WHERE m.conversation_id = v.id), 0) DESC, v.id DESC`
     )
-    .all(id(req.params.id));
+    .all(id(req.params.id), req.query.kind === 'scene' ? 'scene' : 'dm');
   res.json(convs.map((c) => ({ ...c, members: conversationMembers(c.id) })));
 });
 api.post('/worlds/:id/conversations', (req, res) => {
-  const { memberIds = [], playerId = null, title = '' } = req.body;
-  if (!memberIds.length) throw httpError(400, 'Pick at least one character to talk to.');
-  const r = db.prepare('INSERT INTO conversations (world_id, player_id, title) VALUES (?, ?, ?)').run(id(req.params.id), playerId, title);
+  const wid = id(req.params.id);
+  const { memberIds = [], playerId = null, title = '', kind = 'dm', setting = '' } = req.body;
+  if (!memberIds.length) throw httpError(400, 'Pick at least one character.');
+  memberIds.forEach((m) => character(m, wid));
+  if (playerId) character(playerId, wid);
+  // a 1:1 DM with the same person reopens the existing thread instead of starting over
+  if (kind !== 'scene' && memberIds.length === 1 && playerId) {
+    return res.json({ id: findOrCreateDm(wid, character(playerId), character(memberIds[0])) });
+  }
+  const r = db.prepare('INSERT INTO conversations (world_id, player_id, title, kind, setting) VALUES (?, ?, ?, ?, ?)')
+    .run(wid, playerId, title, kind === 'scene' ? 'scene' : 'dm', setting);
   const ins = db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id, character_id) VALUES (?, ?)');
   for (const m of memberIds) ins.run(r.lastInsertRowid, m);
   res.json({ id: Number(r.lastInsertRowid) });
 });
 api.get('/conversations/:id', (req, res) => {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id(req.params.id));
-  if (!conv) throw httpError(404, 'Conversation not found');
+  const conv = conversation(req.params.id);
+  db.prepare('UPDATE conversations SET unread = 0 WHERE id = ?').run(conv.id);
   const messages = db
     .prepare('SELECT m.*, c.name, c.handle, c.color FROM messages m LEFT JOIN characters c ON c.id = m.character_id WHERE m.conversation_id = ? ORDER BY m.id')
     .all(conv.id);
   res.json({ ...conv, members: conversationMembers(conv.id), messages });
 });
 api.put('/conversations/:id', (req, res) => {
-  if ('playerId' in req.body) db.prepare('UPDATE conversations SET player_id = ? WHERE id = ?').run(req.body.playerId || null, id(req.params.id));
-  if ('title' in req.body) db.prepare('UPDATE conversations SET title = ? WHERE id = ?').run(req.body.title, id(req.params.id));
-  if ('summary' in req.body) db.prepare('UPDATE conversations SET summary = ? WHERE id = ?').run(req.body.summary, id(req.params.id));
+  const conv = conversation(req.params.id);
+  if ('playerId' in req.body) {
+    if (req.body.playerId) character(req.body.playerId, conv.world_id);
+    db.prepare('UPDATE conversations SET player_id = ? WHERE id = ?').run(req.body.playerId || null, conv.id);
+  }
+  for (const f of ['title', 'summary', 'setting']) {
+    if (f in req.body) db.prepare(`UPDATE conversations SET ${f} = ? WHERE id = ?`).run(String(req.body[f] ?? ''), conv.id);
+  }
   res.json({ ok: true });
 });
 api.delete('/conversations/:id', (req, res) => {
@@ -248,8 +391,7 @@ api.delete('/conversations/:id', (req, res) => {
   res.json({ ok: true });
 });
 api.post('/conversations/:id/messages', (req, res) => {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(id(req.params.id));
-  if (!conv) throw httpError(404, 'Conversation not found');
+  const conv = conversation(req.params.id);
   if (!req.body.content?.trim()) throw httpError(400, 'Message is empty');
   const r = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 1, ?)').run(conv.id, conv.player_id, req.body.content.trim());
   res.json({ id: Number(r.lastInsertRowid) });
@@ -259,8 +401,10 @@ api.delete('/messages/:id', (req, res) => {
   res.json({ ok: true });
 });
 api.get('/conversations/:id/next', (req, res) => res.json(pickResponder(id(req.params.id))));
+/** "Let it spread": push what happened in this DM/scene into the world right now. */
+api.post('/conversations/:id/observe', async (req, res) => res.json(await observeConversation(conversation(req.params.id).id, { force: true })));
 
-/** Streams the next character reply as Server-Sent Events. */
+/** Streams the next reply as Server-Sent Events. */
 api.post('/conversations/:id/reply', async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
