@@ -135,7 +135,32 @@ function buildDmPrompt(conv, speaker) {
   return { messages, lore };
 }
 
-/** In-person scene off the app: one narrator voices every NPC present. */
+/**
+ * People who aren't in the scene/DM but would care about it: characters it mentions, and whoever the
+ * human has been talking to lately (e.g. the person who asked them to do something).
+ */
+function interestedParties(conv, text, exclude) {
+  const skip = new Set(exclude.map((c) => c.id));
+  const pool = db.prepare("SELECT * FROM characters WHERE world_id = ? AND kind != 'player'").all(conv.world_id).filter((c) => !skip.has(c.id));
+  const mentioned = pool.filter((c) =>
+    [`@${c.handle}`, ...knownNames(c), ...knownNames(c).map((n) => n.split(/\s+/)[0]).filter((n) => n.length >= 3)].some((n) =>
+      new RegExp(`(^|[^\\w@])${escapeRe(n)}\\b`, 'i').test(text) || (n.startsWith('@') && text.toLowerCase().includes(n.toLowerCase()))
+    )
+  );
+  const recentContacts = conv.player_id
+    ? db
+        .prepare(
+          `SELECT DISTINCT m.character_id AS id FROM conversation_members m JOIN conversations v ON v.id = m.conversation_id
+           WHERE v.world_id = ? AND v.player_id = ? AND v.id != ? ORDER BY (SELECT MAX(id) FROM messages x WHERE x.conversation_id = v.id) DESC LIMIT 4`
+        )
+        .all(conv.world_id, conv.player_id, conv.id)
+        .map((r) => pool.find((c) => c.id === r.id))
+        .filter(Boolean)
+    : [];
+  return [...new Set([...mentioned, ...recentContacts])].slice(0, 6);
+}
+
+/** In-person scene off the app: one narrator voices every NPC present (or just the world, if the human is alone). */
 function buildScenePrompt(conv) {
   const s = getSettings();
   const world = getWorld(conv.world_id);
@@ -144,13 +169,18 @@ function buildScenePrompt(conv) {
   const hist = history(conv, s.recentMessages);
   const lore = activateLore(conv.world_id, [conv.setting, ...hist.slice(-s.scanDepth).map((m) => m.content), ...npcs.flatMap(knownNames)].join('\n'), undefined, { boost: npcs.flatMap(knownNames) });
   const you = player ? player.name : 'the user\'s character';
+  const others = interestedParties(conv, [conv.setting, ...hist.map((m) => m.content)].join('\n'), npcs);
 
   const stable = join([
     worldPreamble(world),
     `This is a REAL-LIFE, in-person scene — not on the social network.${conv.setting ? ` Setting: ${conv.setting}` : ''}`,
-    `CHARACTERS PRESENT (you play all of them):\n${npcs.map((n) => characterCard(n)).join('\n\n')}`,
+    npcs.length
+      ? `CHARACTERS PRESENT (you play all of them):\n${npcs.map((n) => characterCard(n)).join('\n\n')}`
+      : `${you} is on their own. Narrate the surroundings, events and any strangers or background people they meet. Characters they know only appear if it makes sense (${you} goes to them, calls them, or runs into them).`,
     player && personaBlock([player]),
-    `The user writes what ${you} does and says (actions may be in *asterisks* or plain prose). You narrate how the world and the characters present react: their actions, body language and dialogue, in vivid but tight prose (1-3 paragraphs), in present tense. Characters react truthfully to who they are, their relationships and memories — they can get angry, fight back, cry, call someone, or leave.
+    others.length && `PEOPLE IN ${you.toUpperCase()}'S LIFE (not present unless the story brings them in):\n${others.map((o) => characterCard(o, { brief: true })).join('\n\n')}`,
+    `The user writes what ${you} does and says (actions may be in *asterisks* or plain prose). You narrate how the world${npcs.length ? ' and the characters present' : ''} react: actions, body language and dialogue, in vivid but tight prose (1-3 paragraphs), in present tense. People react truthfully to who they are, their relationships and memories — they can get angry, fight back, cry, call someone, or leave.
+Things can go wrong or have complications; don't just let everything succeed.
 NEVER write ${you}'s actions, dialogue, thoughts or feelings beyond what the user wrote. Stop at a point where ${you} can respond. What happens here is real and will have consequences online later.`
   ]);
   const dynamic = join([
@@ -259,9 +289,13 @@ export async function observeConversation(convId, { force = false } = {}) {
   observing.add(convId);
   try {
     const world = getWorld(conv.world_id);
-    const npcs = conversationMembers(convId).filter((m) => m.kind !== 'player');
+    const present = conversationMembers(convId).filter((m) => m.kind !== 'player');
     const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
-    const where = conv.kind === 'scene' ? `an in-person scene${conv.setting ? ` (${conv.setting})` : ''}` : 'a private DM conversation';
+    const others = interestedParties(conv, [conv.setting, ...msgs.map((m) => m.content)].join('\n'), present);
+    const npcs = [...present, ...others];
+    const where = conv.kind === 'scene'
+      ? `an in-person scene${conv.setting ? ` (${conv.setting})` : ''}${present.length ? '' : ` where ${player?.name || 'the human'} was on their own`}`
+      : 'a private DM conversation';
     const out = await completeJSON({
       task: 'observe',
       maxTokens: 900,
@@ -278,7 +312,8 @@ Return ONLY JSON: {"posts":[{"handle":string,"content":string}],${UPDATES_SCHEMA
         {
           role: 'user',
           content: join([
-            `NPCs INVOLVED:\n${npcs.map((n) => characterCard(n, { brief: true })).join('\n\n')}`,
+            present.length && `NPCs WHO WERE THERE:\n${present.map((n) => characterCard(n, { brief: true })).join('\n\n')}`,
+            others.length && `OTHER PEOPLE WHO MIGHT FIND OUT OR CARE (only give them memories or posts if they would realistically know — e.g. they asked for this, were told, saw it, or heard through gossip):\n${others.map((n) => characterCard(n, { brief: true })).join('\n\n')}`,
             player && personaBlock([player]),
             worldContext(conv.world_id, { focus: npcs, others: player ? [player] : [], memoriesPer: 3 }),
             `WHAT HAPPENED:\n${msgs.map((m) => `${m.is_player ? player?.name || 'User' : m.name || 'Narrator'}: ${clip(m.content, 700)}`).join('\n')}`

@@ -39,7 +39,7 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - Opening a thread sometimes has people already typing.
 6. **Notifications:** replies, @mentions, follows, likes, DMs and trending drama.
 7. **Messages:** DMs and group chats with real-time streaming and texting style (several short messages in a row). Characters can also DM you first.
-8. **Real Life:** in-person scenes outside the app, such as *"I drive to his house and cuss him out"*.
+8. **Real Life:** in-person scenes outside the app, on your own or with characters, such as *"I drive to his house and cuss him out"* or *"I go pick up the package she asked for"*. People can join a scene partway through.
    - A narrator plays every character present, and never acts for you.
    - What happens is remembered and can show up on the feed as venting, subtweets or leaks.
    - **Let it spread** pushes it into the world immediately. **Meet IRL** in a DM takes that conversation offline.

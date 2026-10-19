@@ -6,7 +6,7 @@ const COPY = {
   dm: { title: 'Messages', empty: 'Start a DM or group chat with one or more characters.', start: 'New message', placeholder: 'Message…' },
   scene: {
     title: 'Real Life',
-    empty: 'Interact with characters in person, outside the app. Go to their house, confront them, hang out — what happens here ripples back into the feed.',
+    empty: 'Do things in person, outside the app — on your own or with other characters. Run an errand, go to someone\'s house, confront them — what happens here ripples back into the feed.',
     start: 'New scene',
     placeholder: 'What do you do or say? e.g. *I drive to his place and bang on the door* "OPEN UP"'
   }
@@ -37,9 +37,9 @@ export default function Chats(props) {
         </div>
         {convs.map((c) => (
           <button key={c.id} className={`conv ${c.id === activeId ? 'active' : ''} ${c.unread ? 'has-unread' : ''}`} onClick={() => setActiveId(c.id)}>
-            <div className="stack">{c.members.slice(0, 3).map((m) => <Avatar key={m.id} c={m} size={30} />)}</div>
+            <div className="stack">{c.members.length ? c.members.slice(0, 3).map((m) => <Avatar key={m.id} c={m} size={30} />) : <div className="avatar solo" style={{ width: 30, height: 30 }}>☖</div>}</div>
             <div className="conv-text">
-              <b>{c.title || c.members.map((m) => m.name).join(', ')}</b>
+              <b>{convTitle(c)}</b>
               <div className="muted small ellipsis">{kind === 'scene' && c.setting ? `📍 ${c.setting}` : c.lastMessage || 'Nothing yet'}</div>
             </div>
             {c.unread > 0 && <span className="count">{c.unread}</span>}
@@ -82,7 +82,7 @@ function NewConversation({ worldId, kind, chars, persona, notify, onClose, onCre
             <input value={setting} onChange={(e) => setSetting(e.target.value)} placeholder="e.g. Outside Tolan's house, late at night" />
           </label>
         )}
-        <label>{kind === 'scene' ? 'Who is there' : 'To (one for a DM, several for a group chat)'}</label>
+        <label>{kind === 'scene' ? 'Who is there (optional — leave empty to go on your own)' : 'To (one for a DM, several for a group chat)'}</label>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search characters…" />
         <div className="pick-list">
           {ai.filter((c) => `${c.name} ${c.handle}`.toLowerCase().includes(q.toLowerCase())).map((c) => (
@@ -94,15 +94,17 @@ function NewConversation({ worldId, kind, chars, persona, notify, onClose, onCre
         </div>
         <div className="row space">
           <button onClick={onClose}>Cancel</button>
-          <AsyncButton className="primary" notify={notify} disabled={!members.length} onClick={async () => {
+          <AsyncButton className="primary" notify={notify} disabled={kind !== 'scene' && !members.length} onClick={async () => {
             const r = await api.post(`/worlds/${worldId}/conversations`, { memberIds: members, playerId: persona?.id ?? null, kind, setting });
             onCreated(r.id);
-          }}>Start</AsyncButton>
+          }}>{kind === 'scene' && !members.length ? 'Go alone' : 'Start'}</AsyncButton>
         </div>
       </div>
     </div>
   );
 }
+
+const convTitle = (c) => c.title || (c.members.length ? c.members.map((m) => m.name).join(', ') : 'On your own');
 
 const stripPrefix = (text, members) => {
   const m = text.match(/^\s*\**([^:\n*]{1,40})\**\s*:\s*/);
@@ -180,7 +182,7 @@ function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfil
       <header className="conv-head">
         <div className="stack">{conv.members.slice(0, 4).map((m) => <span key={m.id} onClick={() => openProfile(m.id)} className="clickable"><Avatar c={m} size={34} /></span>)}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <b>{conv.title || conv.members.map((m) => m.name).join(', ')}</b>
+          <b>{convTitle(conv)}</b>
           <div className="muted small ellipsis">
             {scene && conv.setting && <>📍 {conv.setting} · </>}
             You are {player ? player.name : 'yourself'}
@@ -188,6 +190,13 @@ function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfil
           </div>
         </div>
         {!scene && <button className="link small" onClick={meetIrl} title="Take this offline">Meet IRL</button>}
+        {scene && (
+          <select className="add-person" value="" title="Someone shows up or joins you"
+            onChange={async (e) => { await api.post(`/conversations/${id}/members`, { characterId: Number(e.target.value) }); load(); onChange(); }}>
+            <option value="">+ Add someone</option>
+            {chars.filter((c) => c.kind !== 'player' && !conv.members.some((m) => m.id === c.id)).map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        )}
         <AsyncButton className="link small" notify={notify} busyLabel="Spreading…" title="Make what happened here affect the world now (memories, drama, posts)"
           onClick={async () => { const r = await api.post(`/conversations/${id}/observe`); notify(r.posts ? `Word got out: ${r.posts} new post(s)` : 'The world will remember this.'); }}>
           Let it spread

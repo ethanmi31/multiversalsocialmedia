@@ -364,7 +364,7 @@ api.get('/worlds/:id/conversations', (req, res) => {
 api.post('/worlds/:id/conversations', (req, res) => {
   const wid = id(req.params.id);
   const { memberIds = [], playerId = null, title = '', kind = 'dm', setting = '' } = req.body;
-  if (!memberIds.length) throw httpError(400, 'Pick at least one character.');
+  if (!memberIds.length && kind !== 'scene') throw httpError(400, 'Pick at least one character.'); // scenes can be solo
   memberIds.forEach((m) => character(m, wid));
   if (playerId) character(playerId, wid);
   // a 1:1 DM with the same person reopens the existing thread instead of starting over
@@ -408,6 +408,14 @@ api.post('/conversations/:id/messages', (req, res) => {
 });
 api.delete('/messages/:id', (req, res) => {
   db.prepare('DELETE FROM messages WHERE id = ?').run(id(req.params.id));
+  res.json({ ok: true });
+});
+/** Someone joins a scene or group chat already in progress. */
+api.post('/conversations/:id/members', (req, res) => {
+  const conv = conversation(req.params.id);
+  const c = character(req.body.characterId, conv.world_id);
+  if (c.kind === 'player') throw httpError(400, 'Your personas take part as you, not as members.');
+  db.prepare('INSERT OR IGNORE INTO conversation_members (conversation_id, character_id) VALUES (?, ?)').run(conv.id, c.id);
   res.json({ ok: true });
 });
 api.get('/conversations/:id/next', (req, res) => res.json(pickResponder(id(req.params.id))));

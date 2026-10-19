@@ -243,3 +243,5 @@ a.mention:hover { text-decoration: underline; }
 .import-row.inactive { opacity: 0.5; }
 textarea.drop-over { outline: 2px dashed var(--accent); }
 .post-actions { align-items: center; } .post-actions .stat { padding: 2px 4px; }
+.avatar.solo { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); font-size: 14px; }
+select.add-person { width: auto; padding: 3px 8px; font-size: 12.5px; }
