@@ -40,6 +40,10 @@ export function worldPreamble(world) {
   if (world.summary) out += `${world.summary}\n`;
   else if (world.description) out += `${world.description}\n`;
   if (world.rules?.trim()) out += `\nUNIVERSE RULES (always follow):\n${world.rules.trim()}\n`;
+  const notes = db.prepare('SELECT content FROM director_notes WHERE world_id = ? AND active = 1 ORDER BY id').all(world.id);
+  if (notes.length) {
+    out += `\nDIRECTOR NOTES (the author's standing corrections for this universe — they override everything above):\n${notes.map((n) => `- ${n.content}`).join('\n')}\n`;
+  }
   return out;
 }
 
@@ -377,10 +381,18 @@ Return ONLY JSON: ${schema}`
     }
   }
 
+  const tickStart = db.prepare("SELECT datetime('now') AS t").get().t;
   applyUpdates(worldId, { ...(out.updates || {}), follows: out.follows, unfollows: out.unfollows, likes: out.likes }, 'feed');
+  coolDownStorylines(worldId, tickStart);
   simulateEngagement(worldId);
   db.prepare('UPDATE worlds SET last_tick_at = CURRENT_TIMESTAMP WHERE id = ?').run(worldId);
   return { created, dms };
+}
+
+/** Drama nobody touched this tick cools off, and fizzles out entirely once it's cold, so old plots don't linger forever. */
+function coolDownStorylines(worldId, since) {
+  db.prepare("UPDATE storylines SET heat = MAX(0, heat - 8) WHERE world_id = ? AND status = 'active' AND updated_at < ?").run(worldId, since);
+  db.prepare("UPDATE storylines SET status = 'resolved' WHERE world_id = ? AND status = 'active' AND heat < 15").run(worldId);
 }
 
 // ---------------------------------------------------------------------------

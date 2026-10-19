@@ -245,3 +245,19 @@ textarea.drop-over { outline: 2px dashed var(--accent); }
 .post-actions { align-items: center; } .post-actions .stat { padding: 2px 4px; }
 .avatar.solo { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); font-size: 14px; }
 select.add-person { width: auto; padding: 3px 8px; font-size: 12.5px; }
+
+/* --- director --- */
+.director { display: flex; height: 100vh; }
+.director-chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.director-notes { width: 320px; border-left: 1px solid var(--border); padding: 16px; overflow-y: auto; flex-shrink: 0; }
+.director-intro { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.director-intro .chip { white-space: normal; text-align: left; }
+.director-actions { margin: 8px 0 0; padding: 8px 0 0; border-top: 1px solid var(--border); list-style: none; font-size: 12.5px; color: var(--ok); }
+.note { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+.note.inactive { opacity: 0.5; }
+.note textarea { background: transparent; border: none; padding: 2px; font-size: 13px; }
+@media (max-width: 760px) {
+  .director { flex-direction: column; height: auto; }
+  .director-chat { height: 75vh; }
+  .director-notes { width: 100%; border-left: none; border-top: 1px solid var(--border); }
+}

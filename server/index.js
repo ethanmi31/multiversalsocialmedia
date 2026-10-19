@@ -13,6 +13,7 @@ import {
 import { conversationMembers, pickResponder, streamReply, observeConversation, findOrCreateDm } from './chat.js';
 import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
+import { directorChat, directorState } from './director.js';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -227,6 +228,32 @@ api.delete('/relationships/:from/:to', (req, res) => {
 api.delete('/memories/:id', (req, res) => {
   db.prepare('DELETE FROM memories WHERE id = ?').run(id(req.params.id));
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------- director (out-of-character control, per universe)
+api.get('/worlds/:id/director', (req, res) => res.json(directorState(id(req.params.id))));
+api.post('/worlds/:id/director', async (req, res) => res.json(await directorChat(id(req.params.id), req.body.message)));
+api.delete('/worlds/:id/director/messages', (req, res) => {
+  db.prepare('DELETE FROM director_messages WHERE world_id = ?').run(id(req.params.id));
+  res.json(directorState(id(req.params.id)));
+});
+api.post('/worlds/:id/director/notes', (req, res) => {
+  if (!req.body.content?.trim()) throw httpError(400, 'Note is empty');
+  db.prepare('INSERT INTO director_notes (world_id, content) VALUES (?, ?)').run(id(req.params.id), req.body.content.trim());
+  res.json(directorState(id(req.params.id)));
+});
+api.put('/director/notes/:id', (req, res) => {
+  const n = db.prepare('SELECT * FROM director_notes WHERE id = ?').get(id(req.params.id));
+  if (!n) throw httpError(404, 'Note not found');
+  if ('content' in req.body) db.prepare('UPDATE director_notes SET content = ? WHERE id = ?').run(String(req.body.content), n.id);
+  if ('active' in req.body) db.prepare('UPDATE director_notes SET active = ? WHERE id = ?').run(req.body.active ? 1 : 0, n.id);
+  res.json(directorState(n.world_id));
+});
+api.delete('/director/notes/:id', (req, res) => {
+  const n = db.prepare('SELECT * FROM director_notes WHERE id = ?').get(id(req.params.id));
+  if (!n) throw httpError(404, 'Note not found');
+  db.prepare('DELETE FROM director_notes WHERE id = ?').run(n.id);
+  res.json(directorState(n.world_id));
 });
 
 // ---------------------------------------------------------------- characters

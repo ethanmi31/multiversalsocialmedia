@@ -9,6 +9,7 @@ import Settings from './views/Settings.jsx';
 import Usage from './views/Usage.jsx';
 import Notifications from './views/Notifications.jsx';
 import Profile from './views/Profile.jsx';
+import Director from './views/Director.jsx';
 
 const TABS = [
   { id: 'feed', label: 'Feed', icon: '◎' },
@@ -17,6 +18,7 @@ const TABS = [
   { id: 'scenes', label: 'Real Life', icon: '☖' },
   { id: 'characters', label: 'Characters', icon: '☺' },
   { id: 'world', label: 'World & Lore', icon: '✦' },
+  { id: 'director', label: 'Director', icon: '🎬' },
   { id: 'usage', label: 'Usage', icon: '$' },
   { id: 'settings', label: 'Settings', icon: '⚙' }
 ];
@@ -148,6 +150,7 @@ export default function App() {
             {tab === 'chats' && <Chats key={`dm${worldId}`} kind="dm" initialId={openConv} {...ctx} />}
             {tab === 'scenes' && <Chats key={`scene${worldId}`} kind="scene" initialId={openConv} {...ctx} />}
             {tab === 'characters' && <Characters key={worldId} {...ctx} />}
+            {tab === 'director' && <Director key={worldId} {...ctx} />}
             {tab === 'world' && <WorldEditor key={worldId} {...ctx} onDeleted={() => refreshWorlds()} />}
             {tab === 'settings' && <Settings {...ctx} onSaved={refreshSettings} />}
             {tab === 'usage' && <Usage {...ctx} />}

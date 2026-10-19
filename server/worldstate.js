@@ -7,6 +7,14 @@ export function worldCharacters(worldId) {
   return db.prepare('SELECT * FROM characters WHERE world_id = ?').all(worldId);
 }
 
+/** "3h ago" style age of an SQLite timestamp, for prompts. */
+export function ago(ts) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(String(ts).replace(' ', 'T') + 'Z').getTime()) / 60000));
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return `${Math.round(mins / 1440)}d ago`;
+}
+
 export function personas(worldId) {
   return db.prepare("SELECT * FROM characters WHERE world_id = ? AND kind = 'player'").all(worldId);
 }
@@ -215,7 +223,7 @@ export function worldContext(worldId, { focus = [], others = [], budget = getSet
           .map(({ s, inv }) => {
             const who = inv.map((i) => name.get(i)).filter(Boolean).join(', ');
             const tag = s.visibility === 'private' ? ` PRIVATE — only ${who} know; nobody else may reference it unless told` : '';
-            return `- ${s.title} [heat ${s.heat}${tag}] (${who}): ${s.summary}`;
+            return `- ${s.title} [heat ${s.heat}, last updated ${ago(s.updated_at)}${tag}] (${who}): ${s.summary}`;
           })
           .join('\n')
     );
@@ -236,8 +244,9 @@ export function worldContext(worldId, { focus = [], others = [], budget = getSet
   }
 
   for (const c of focus) {
-    const mem = db.prepare('SELECT content FROM memories WHERE character_id = ? ORDER BY id DESC LIMIT ?').all(c.id, memoriesPer);
-    if (mem.length) parts.push(`@${c.handle} REMEMBERS:\n` + mem.reverse().map((m) => `- ${m.content}`).join('\n'));
+    const mem = db.prepare('SELECT content, created_at FROM memories WHERE character_id = ? ORDER BY id DESC LIMIT ?').all(c.id, memoriesPer);
+    // ages matter: "was at the gas station" from days ago is not where they are now
+    if (mem.length) parts.push(`@${c.handle} REMEMBERS (oldest first; things change, old ones may be outdated):\n` + mem.reverse().map((m) => `- [${ago(m.created_at)}] ${m.content}`).join('\n'));
   }
 
   let out = '';

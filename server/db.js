@@ -164,6 +164,23 @@ CREATE TABLE IF NOT EXISTS notifications (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Director: the author's out-of-character channel to the engine, per universe
+CREATE TABLE IF NOT EXISTS director_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,               -- user | assistant
+  content TEXT NOT NULL,
+  actions TEXT DEFAULT '[]',        -- JSON list of what the director changed
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS director_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,            -- a standing correction, injected into every prompt for this universe
+  active INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_memories_char ON memories(character_id);
 CREATE INDEX IF NOT EXISTS idx_story_world ON storylines(world_id, status);
 CREATE INDEX IF NOT EXISTS idx_notif_world ON notifications(world_id, read);

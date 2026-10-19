@@ -43,7 +43,11 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - A narrator plays every character present, and never acts for you.
    - What happens is remembered and can show up on the feed as venting, subtweets or leaks.
    - **Let it spread** pushes it into the world immediately. **Meet IRL** in a DM takes that conversation offline.
-9. **Profiles:** click any name to see posts, followers, follow/unfollow, Message, Meet IRL, and what that character remembers (editable).
+9. **Director:** an out-of-character chat with the engine for the current universe. Tell it what to fix or stop doing ("wrap up that storyline", "Lira went home, stop putting her at the gas station").
+   - It changes the world state directly: storylines, memories, relationships, who's on the platform.
+   - Lasting corrections become **notes**, standing rules added to every prompt in that universe. You can edit them or switch them off in the side panel.
+   - It only reads and changes its own universe.
+10. **Profiles:** click any name to see posts, followers, follow/unfollow, Message, Meet IRL, and what that character remembers (editable).
 
 ### How memory and drama work
 
@@ -52,6 +56,8 @@ The engine tracks a hidden world state per universe. It's visible under **World 
 - **Storylines:** ongoing drama, plots and platform events, each with a *heat* value. Hot storylines trend and pull their characters into the next tick.
 - **Relationships:** how X feels about Y (−100 to 100) plus a short status, changing on their own over time.
 - **Memories:** what each character remembers from posts, threads, DMs and scenes.
+
+Storylines nobody touches cool down each time time passes and wrap up once they go cold. Memories and storylines are given to the AI with their age ("3d ago"), so old details like where someone was aren't treated as current.
 
 These updates ride along on calls the app already makes (ticks, replies), plus a cheap "continuity" pass every few DM or scene messages. The relevant part is injected into each prompt under its own token budget. DMs also get your shared public history with that character and your recent public posts.
 
