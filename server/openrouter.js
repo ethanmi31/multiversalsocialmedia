@@ -151,7 +151,7 @@ export function tryParseJSON(text) {
   return undefined;
 }
 
-/** Streaming completion. Calls onToken for each delta, resolves with the full text. */
+/** Streaming completion. Calls onToken for each delta; resolves with the full text and why the model stopped. */
 export async function stream({ task, model, messages, maxTokens, temperature, onToken, signal }) {
   const s = getSettings();
   model ||= s.chatModel;
@@ -165,6 +165,7 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
   let full = '';
   let usage = null;
   let servedModel = model;
+  let finish = null;
   signal?.addEventListener('abort', () => reader.cancel().catch(() => {}));
 
   while (true) {
@@ -183,6 +184,7 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
       if (chunk.error) throw httpError(502, `OpenRouter error: ${chunk.error.message || 'stream failed'}`);
       if (chunk.model) servedModel = chunk.model;
       if (chunk.usage) usage = chunk.usage;
+      finish = chunk.choices?.[0]?.finish_reason || finish;
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
         full += delta;
@@ -192,7 +194,7 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
   }
   logUsage(task, servedModel, usage);
   if (!full.trim()) throw emptyError(servedModel);
-  return full;
+  return { text: full, finish };
 }
 
 let modelCache = { at: 0, data: null };

@@ -8,7 +8,8 @@ const NUMBERS = [
   ['loreBudget', 'Lore budget (tokens)', 'Max lorebook tokens injected per request. The biggest lever on cost. 800–1500 is plenty for most chats.'],
   ['scanDepth', 'Keyword scan depth (messages)', 'How many recent messages are scanned for lore keywords.'],
   ['recentMessages', 'Recent messages kept verbatim', 'Older messages are folded into a rolling summary by the utility model.'],
-  ['maxReplyTokens', 'Max reply length (tokens)', 'Caps the length of each chat reply.'],
+  ['maxReplyTokens', 'DM reply length (tokens)', 'Caps the length of each DM / group chat reply.'],
+  ['sceneMaxTokens', 'Real-life reply length (tokens)', 'Caps each narration in Real Life scenes. Raise it if scenes get cut off (~750 words per 1000 tokens).'],
   ['temperature', 'Temperature', 'Higher = more creative, lower = more consistent.'],
   ['compileChunkTokens', 'Compile chunk size (tokens)', 'Document chunk size for AI compile. Bigger chunks = fewer calls but the model may skip details.'],
   ['worldStateBudget', 'World-state budget (tokens)', 'Max tokens of storylines, relationships and memories injected per request.']

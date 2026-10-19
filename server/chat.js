@@ -213,9 +213,12 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
     promptTokens: estimateTokens(messages.map((m) => m.content).join('\n'))
   });
 
-  const raw = await stream({ task: scene ? 'scene' : 'chat', messages, onToken, signal, maxTokens: scene ? Math.max(getSettings().maxReplyTokens, 600) : undefined });
+  const s = getSettings();
+  const { text: raw, finish } = await stream({ task: scene ? 'scene' : 'chat', messages, onToken, signal, maxTokens: scene ? s.sceneMaxTokens : s.maxReplyTokens });
+  const truncated = finish === 'length';
   const members = conversationMembers(convId);
-  const text = scene ? cleanScene(raw, conv) : cleanReply(raw, members, conv.player_id);
+  let text = scene ? cleanScene(raw, conv) : cleanReply(raw, members, conv.player_id);
+  if (truncated) text = toLastSentence(text);
   if (!text) throw httpError(502, 'The reply was empty after removing lines written for other people. Try regenerating.');
   const ins = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 0, ?)');
   const ids = (scene ? [text] : splitBubbles(text)).map((part) => Number(ins.run(convId, speaker?.id ?? null, part).lastInsertRowid));
@@ -223,7 +226,13 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
   // Background upkeep: fold old messages into memory, and let what happened ripple into the world.
   maybeSummarize(convId).catch((e) => console.error('summary failed:', e.message));
   observeConversation(convId).catch((e) => console.error('observe failed:', e.message));
-  return db.prepare('SELECT * FROM messages WHERE id = ?').get(ids[ids.length - 1]);
+  return { ...db.prepare('SELECT * FROM messages WHERE id = ?').get(ids[ids.length - 1]), truncated };
+}
+
+/** A reply that hit the token limit ends mid-word: cut back to the last complete sentence (if there is a sensible one). */
+function toLastSentence(text) {
+  const m = text.match(/^[\s\S]*[.!?…"”*)](?=\s|$)/);
+  return m && m[0].length > text.length * 0.5 ? m[0].trim() : text.trim();
 }
 
 /** Strips a leading "Name:" and cuts the reply where the model starts writing lines for someone else. */

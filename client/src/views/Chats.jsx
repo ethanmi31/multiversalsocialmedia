@@ -134,7 +134,8 @@ function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfil
       await streamPost(`/conversations/${id}/reply`, { characterId: characterId || undefined }, {
         meta: (m) => { setMeta(m); setStreaming({ speaker: m.speaker, text: '' }); },
         token: (t) => setStreaming((s) => ({ ...s, text: s.text + t })),
-        error: (e) => notify(e.message, 'error')
+        error: (e) => notify(e.message, 'error'),
+        done: (m) => m.truncated && notify(`That reply hit the length limit and was trimmed. Raise "${scene ? 'Real-life' : 'DM'} reply length" in Settings for longer ones.`)
       }, ac.signal);
     } catch (e) {
       if (e.name !== 'AbortError') notify(e.message, 'error');

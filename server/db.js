@@ -192,6 +192,7 @@ export const DEFAULT_SETTINGS = {
   scanDepth: 4,            // how many recent messages are scanned for lore keywords
   recentMessages: 12,      // messages sent verbatim; older ones get summarized
   maxReplyTokens: 400,
+  sceneMaxTokens: 1200,    // real-life scene narration is longer than texting
   temperature: 0.9,
   compileChunkTokens: 3000, // size of document chunks sent to the compiler
   worldStateBudget: 700,   // max tokens of storylines/relationships/memories injected per request
