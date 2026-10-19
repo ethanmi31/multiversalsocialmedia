@@ -285,7 +285,7 @@ export function startCompile(worldId, { mode = 'ai', replace = true } = {}) {
             const i = next++;
             try {
               const out = await completeJSON({
-                task: 'compile',
+                task: 'compile', expect: 'entries',
                 messages: compilerMessages(chunks[i], i, chunks.length, world.instructions),
                 maxTokens: Math.min(8000, Math.round(s.compileChunkTokens * 1.2) + 500),
                 temperature: 0.2

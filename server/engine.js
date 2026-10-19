@@ -111,8 +111,8 @@ export async function generateCharacters(worldId, { count = 5, theme = '' } = {}
   const lore = activateLore(worldId, `${theme}\n${titles.slice(0, 15).join('\n')}`);
 
   const out = await completeJSON({
-    task: 'generate-users',
-    maxTokens: 320 * count + 300,
+    task: 'generate-users', expect: 'characters',
+    maxTokens: 450 * count + 600,
     temperature: 1,
     messages: [
       {
@@ -189,7 +189,7 @@ export async function splitCharactersAI(worldId, text) {
   const result = [];
   for (const piece of pieces) {
     const out = await completeJSON({
-      task: 'import-characters',
+      task: 'import-characters', expect: 'characters',
       maxTokens: 2500,
       temperature: 0.4,
       messages: [
@@ -290,7 +290,7 @@ ${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n'
 ${UPDATES_SCHEMA}}`;
 
   const out = await completeJSON({
-    task: 'tick',
+    task: 'tick', expect: 'posts',
     maxTokens: 200 * count + 900,
     temperature: 1,
     messages: [
@@ -422,7 +422,7 @@ export async function generateReplies(postId, { count, humanReplyId } = {}) {
   const lore = activateLore(world.id, `${text}\n${responders.map((r) => r.name).join(' ')}`, undefined, { boost: responders.map((r) => r.name) });
 
   const out = await completeJSON({
-    task: 'replies',
+    task: 'replies', expect: 'replies',
     maxTokens: 170 * count + 600,
     temperature: 0.95,
     messages: [

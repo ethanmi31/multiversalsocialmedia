@@ -1,3 +1,4 @@
+import { jsonrepair } from 'jsonrepair';
 import { db, getSettings } from './db.js';
 
 const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
@@ -48,7 +49,12 @@ async function post(body, apiKey) {
 }
 
 /** One-shot completion. Returns the text content. */
-export async function complete({ task, model, messages, maxTokens, temperature, json = false }) {
+export async function complete(opts) {
+  return (await request(opts)).text;
+}
+
+/** Like complete(), but also reports why the model stopped (e.g. "length" when it ran out of tokens). */
+async function request({ task, model, messages, maxTokens, temperature, json = false }) {
   const s = getSettings();
   model ||= s.utilityModel;
   const body = {
@@ -68,7 +74,7 @@ export async function complete({ task, model, messages, maxTokens, temperature, 
     text = messageText(data);
   }
   if (!text) throw emptyError(data.model || model, data.choices?.[0]?.finish_reason);
-  return text;
+  return { text, finish: data.choices?.[0]?.finish_reason, model: data.model || model };
 }
 
 function messageText(data) {
@@ -86,21 +92,63 @@ function emptyError(model, finish) {
   );
 }
 
-/** Completion that must return JSON; tolerates code fences and chatter around the object. */
+/**
+ * Completion that must return JSON. Repairs common model mistakes (code fences, chatter, trailing commas,
+ * smart quotes, cut-off output) and retries once if the answer still can't be read.
+ */
 export async function completeJSON(opts) {
-  const text = await complete({ ...opts, json: true });
-  return parseJSONLoose(text);
+  // opts.expect: the list the answer must contain (e.g. "characters"), so a reply missing it counts as unreadable
+  const read = (text) => {
+    const v = tryParseJSON(text);
+    if (v === undefined || !opts.expect) return v;
+    if (Array.isArray(v)) return { [opts.expect]: v };
+    return Array.isArray(v[opts.expect]) ? v : undefined;
+  };
+  const first = await request({ ...opts, json: true });
+  const parsed = read(first.text);
+  if (parsed !== undefined) return parsed;
+
+  const retry = first.finish === 'length'
+    ? { ...opts, maxTokens: Math.min(16000, (opts.maxTokens ?? 1500) * 2) } // it ran out of room mid-answer
+    : {
+        ...opts,
+        temperature: Math.min(opts.temperature ?? 0.7, 0.5),
+        messages: [...opts.messages, { role: 'assistant', content: first.text.slice(0, 4000) }, { role: 'user', content: 'That was not valid JSON. Reply again with ONLY the JSON object, no other text.' }]
+      };
+  const second = await request({ ...retry, json: true });
+  const again = read(second.text);
+  if (again !== undefined) return again;
+
+  console.error(`[${opts.task}] unreadable JSON from ${second.model} (finish: ${second.finish}):\n${second.text.slice(0, 1500)}`);
+  throw httpError(
+    502,
+    `The model (${second.model}) didn't return usable data${second.finish === 'length' ? ' (it ran out of tokens)' : ''}. ` +
+      'Try again, ask for fewer at once, or pick a different utility model in Settings. The raw reply was printed in the terminal.'
+  );
 }
 
-export function parseJSONLoose(text) {
-  const cleaned = String(text).replace(/```(?:json)?/gi, '').trim();
-  try { return JSON.parse(cleaned); } catch {}
+/** Returns the parsed value, or undefined if the text can't be turned into JSON even after repair. */
+export function tryParseJSON(text) {
+  const cleaned = String(text)
+    .replace(/<think>[\s\S]*?<\/think>/gi, '') // reasoning models sometimes inline their thoughts
+    .replace(/```(?:json)?/gi, '')
+    .trim();
   const start = cleaned.search(/[[{]/);
   const end = Math.max(cleaned.lastIndexOf('}'), cleaned.lastIndexOf(']'));
-  if (start >= 0 && end > start) {
-    try { return JSON.parse(cleaned.slice(start, end + 1)); } catch {}
+  if (start < 0) return undefined; // no data at all, just prose
+  const candidates = [cleaned.slice(start)];
+  if (end > start) candidates.unshift(cleaned.slice(start, end + 1));
+  // strict parse first, then repair (trailing commas, smart quotes, cut-off endings...)
+  for (const parse of [JSON.parse, (c) => JSON.parse(jsonrepair(c))]) {
+    for (const c of candidates) {
+      try {
+        let v = parse(c);
+        if (typeof v === 'string') v = JSON.parse(v); // double-encoded
+        if (v && typeof v === 'object') return v;
+      } catch {}
+    }
   }
-  throw httpError(502, 'The model did not return valid JSON. Try again or pick a different utility model.');
+  return undefined;
 }
 
 /** Streaming completion. Calls onToken for each delta, resolves with the full text. */
