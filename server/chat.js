@@ -186,7 +186,7 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
   const raw = await stream({ task: scene ? 'scene' : 'chat', messages, onToken, signal, maxTokens: scene ? Math.max(getSettings().maxReplyTokens, 600) : undefined });
   const members = conversationMembers(convId);
   const text = scene ? cleanScene(raw, conv) : cleanReply(raw, members, conv.player_id);
-  if (!text) throw httpError(502, 'The model returned an empty reply.');
+  if (!text) throw httpError(502, 'The reply was empty after removing lines written for other people. Try regenerating.');
   const ins = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 0, ?)');
   const ids = (scene ? [text] : splitBubbles(text)).map((part) => Number(ins.run(convId, speaker?.id ?? null, part).lastInsertRowid));
 

@@ -58,10 +58,32 @@ export async function complete({ task, model, messages, maxTokens, temperature, 
     temperature: temperature ?? 0.7
   };
   if (json) body.response_format = { type: 'json_object' };
-  const res = await post(body, s.apiKey);
-  const data = await res.json();
+  let data = await (await post(body, s.apiKey)).json();
   logUsage(task, data.model || model, data.usage);
-  return data.choices?.[0]?.message?.content ?? '';
+  let text = messageText(data);
+  if (!text) {
+    // "Thinking" models can spend the whole token allowance reasoning and return no answer: retry once with room to spare.
+    data = await (await post({ ...body, max_tokens: Math.max(4000, body.max_tokens * 4) }, s.apiKey)).json();
+    logUsage(task, data.model || model, data.usage);
+    text = messageText(data);
+  }
+  if (!text) throw emptyError(data.model || model, data.choices?.[0]?.finish_reason);
+  return text;
+}
+
+function messageText(data) {
+  const c = data?.choices?.[0]?.message?.content;
+  const text = Array.isArray(c) ? c.map((p) => p?.text || '').join('') : c || '';
+  return text.trim();
+}
+
+function emptyError(model, finish) {
+  return httpError(
+    502,
+    `The model (${model}) returned an empty response${finish ? ` (finish reason: ${finish})` : ''}. ` +
+      `This usually means it is a "thinking" model that used up its tokens, or the provider filtered the request. ` +
+      `Try a different model in Settings.`
+  );
 }
 
 /** Completion that must return JSON; tolerates code fences and chatter around the object. */
@@ -121,6 +143,7 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
     }
   }
   logUsage(task, servedModel, usage);
+  if (!full.trim()) throw emptyError(servedModel);
   return full;
 }
 

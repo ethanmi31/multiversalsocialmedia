@@ -384,9 +384,10 @@ export async function summarizeWorld(worldId) {
     digest += line;
   }
   if (!digest) digest = (world.source_text || '').slice(0, 24000);
+  if (!digest.trim() && !world.description?.trim()) throw httpError(400, 'Nothing to summarize yet: import lorebook entries (or upload a document) first.');
   const summary = await complete({
     task: 'summary',
-    maxTokens: 500,
+    maxTokens: 800,
     temperature: 0.3,
     messages: [
       {
