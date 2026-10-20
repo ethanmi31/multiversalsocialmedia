@@ -2,7 +2,7 @@ import { db, estimateTokens, getSettings } from './db.js';
 import { activateLore } from './lorebook.js';
 import { complete, completeJSON, stream, httpError } from './openrouter.js';
 import { characterCard, clip, escapeRe, getWorld, worldPreamble, personaBlock, realName, knownNames } from './engine.js';
-import { applyUpdates, notify, notifyForPost, publicHistory, recentPostsBy, resolver, worldContext, UPDATES_SCHEMA, UPDATES_RULES } from './worldstate.js';
+import { applyUpdates, notify, notifyForPost, publicHistory, recentPostsBy, postLine, resolver, worldContext, UPDATES_SCHEMA, UPDATES_RULES } from './worldstate.js';
 
 const join = (parts) => parts.filter(Boolean).join('\n\n');
 
@@ -88,10 +88,10 @@ function memoryBlock(worldId, speaker, player, others) {
     const shared = publicHistory(worldId, speaker, player);
     if (shared.length) parts.push(`PUBLIC INTERACTIONS BETWEEN YOU AND @${player.handle}:\n${shared.map((p) => `- @${p.handle}: ${clip(p.content, 200)}`).join('\n')}`);
     const theirs = recentPostsBy(player.id, 4);
-    if (theirs.length) parts.push(`@${player.handle}'S RECENT PUBLIC POSTS (you may have seen these):\n${theirs.map((p) => `- ${clip(p.content, 200)}`).join('\n')}`);
+    if (theirs.length) parts.push(`@${player.handle}'S RECENT PUBLIC POSTS (you may or may not have seen these):\n${theirs.map((p) => postLine(p)).join('\n')}`);
   }
   const mine = recentPostsBy(speaker.id, 3);
-  if (mine.length) parts.push(`YOUR OWN RECENT POSTS:\n${mine.map((p) => `- ${clip(p.content, 160)}`).join('\n')}`);
+  if (mine.length) parts.push(`YOUR OWN RECENT POSTS:\n${mine.map((p) => postLine(p, 160)).join('\n')}`);
   return parts.join('\n\n');
 }
 
@@ -123,7 +123,11 @@ function buildDmPrompt(conv, speaker) {
     `YOUR CHARACTER:\n${characterCard(speaker)}`,
     player && personaBlock([player]),
     others.length && `ALSO IN THIS CHAT:\n${others.map((o) => characterCard(o, { brief: true })).join('\n\n')}`,
-    `This is a ${others.length ? 'group chat' : 'private DM'} on the universe's social network. Rapid-fire texting: write only ${speaker.name}'s next message(s) — you may send 1-3 short texts separated by a blank line. No name prefix. Never write anyone else's messages. You remember everything in your memories and public history below; bring it up when it fits.`
+    `This is a ${others.length ? 'group chat' : 'private DM'} on the universe's social network. Rapid-fire texting: write only ${speaker.name}'s next message — usually one short text, sometimes 2-3 separated by a blank line. No name prefix. Never write anyone else's messages.
+Have a real conversation:
+- Respond to what they actually just said. If they say they don't know, are confused, or that you have the wrong person, take it at face value and adapt — clarify, back off, change the subject, or get annoyed and leave — but never repeat the same demand over and over.
+- Only bring up shared history that is actually in your memories, the public interactions or the conversation so far. Never invent past interactions with them (things they "said", "read" or "did") that aren't there.
+- Don't assume they know your private business or lore they haven't been part of; explain things if you want them to understand.`
   ]);
   const dynamic = join([
     lore.text && `RELEVANT LORE:\n${lore.text}`,

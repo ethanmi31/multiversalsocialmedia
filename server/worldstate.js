@@ -271,8 +271,22 @@ export function publicHistory(worldId, a, b, limit = 6) {
     .reverse();
 }
 
+/** Recent posts by a character, with what each reply was replying to (so a reply isn't mistaken for a post in someone else's thread). */
 export function recentPostsBy(characterId, limit = 4) {
-  return db.prepare('SELECT id, content FROM posts WHERE character_id = ? ORDER BY id DESC LIMIT ?').all(characterId, limit).reverse();
+  return db
+    .prepare(
+      `SELECT p.id, p.content, p.parent_id, p.created_at, pc.handle AS parentHandle, pp.content AS parentContent
+       FROM posts p LEFT JOIN posts pp ON pp.id = p.parent_id LEFT JOIN characters pc ON pc.id = pp.character_id
+       WHERE p.character_id = ? ORDER BY p.id DESC LIMIT ?`
+    )
+    .all(characterId, limit)
+    .reverse();
+}
+
+/** "- (replying to @x's post "…") text" — context for a post line in prompts. */
+export function postLine(p, max = 200) {
+  const ctx = p.parent_id ? `(replying to @${p.parentHandle}'s post "${String(p.parentContent || '').slice(0, 80)}") ` : '';
+  return `- [${ago(p.created_at ?? new Date().toISOString())}] ${ctx}${String(p.content).slice(0, max)}`;
 }
 
 export const UPDATES_SCHEMA = `"updates":{

@@ -33,10 +33,20 @@ export function getWorld(worldId) {
   return w;
 }
 
+/**
+ * Characters live inside the fiction. Without this, models mix the engine's meta instructions ("the human",
+ * "the user", "the platform you run") and author/creator lore into what characters believe about the person
+ * they're talking to (e.g. deciding the user's persona built the app).
+ */
+const IN_WORLD_FRAME = `IN-WORLD FRAME: inside the story, the social network is just an ordinary app everyone uses. No character knows who made it or runs it, that it is simulated, or anything about "the human", "the user", "the author" or "personas" — those words are instructions for you, never things characters know. Every account the human plays is, to the characters, simply another person with their own life; treat them exactly as their character description says, not as an admin, creator or narrator. Lore about the real-world author of this multiverse is background only: no character connects it to anyone on the platform unless their own lore says they know the author.
+
+`;
+
 /** The stable part of every prompt. Kept first and identical across calls so provider prompt caching can kick in. */
 export function worldPreamble(world) {
   const s = getSettings();
   let out = s.styleGuide?.trim() ? `${s.styleGuide.trim()}\n\n` : '';
+  out += IN_WORLD_FRAME;
   out += `UNIVERSE: ${world.name}\n`;
   if (world.summary) out += `${world.summary}\n`;
   else if (world.description) out += `${world.description}\n`;
@@ -107,7 +117,7 @@ export function sample(list, n) {
 
 export function personaBlock(ps) {
   if (!ps.length) return '';
-  return `THE HUMAN'S PERSONAS (played by the user — NEVER write posts, replies, DMs, actions or dialogue as them):\n${ps.map((p) => characterCard(p, { brief: true })).join('\n\n')}`;
+  return `ACCOUNTS PLAYED BY THE HUMAN — NEVER write posts, replies, DMs, actions or dialogue for them. In-world they are ordinary people; characters only know what is in these descriptions and what they have actually seen:\n${ps.map((p) => characterCard(p, { brief: true })).join('\n\n')}`;
 }
 
 // ---------------------------------------------------------------------------
