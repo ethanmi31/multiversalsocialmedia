@@ -62,6 +62,7 @@ export function characterCard(c, { brief = false } = {}) {
   if (c.kind !== 'player') s += ` · ${fmtFollowers(followerCount(c))} followers`;
   if (c.persona) s += `\n${clip(c.persona, brief ? 700 : 6000)}`;
   if (c.style) s += `\nVoice: ${clip(c.style, brief ? 160 : 800)}`;
+  if (c.knowledge?.trim()) s += `\nWHAT ${(c.real_name || c.name).toUpperCase()} KNOWS (from the lore — this is genuinely known to them): ${clip(c.knowledge.trim(), brief ? 500 : 3000)}`;
   return s;
 }
 
@@ -273,16 +274,31 @@ function recentFeed(worldId) {
 }
 
 /** Picks who acts this tick: people in hot storylines are more likely to show up. */
+/**
+ * Picks who acts this tick: a friend group (someone plus the people they're closest to) so people who
+ * know each other interact, people in hot storylines, then a few random others.
+ */
 function pickActors(worldId, pool, n) {
-  const hot = new Set(
-    db
-      .prepare("SELECT involved FROM storylines WHERE world_id = ? AND status = 'active' ORDER BY heat DESC LIMIT 4")
-      .all(worldId)
-      .flatMap((s) => JSON.parse(s.involved || '[]'))
-  );
-  const inStory = sample(pool.filter((c) => hot.has(c.id)), Math.ceil(n / 2));
-  const rest = sample(pool.filter((c) => !inStory.includes(c)), n - inStory.length);
-  return [...inStory, ...rest];
+  const byId = new Map(pool.map((c) => [c.id, c]));
+  const chosen = new Set();
+  const seed = sample(pool, 1)[0];
+  if (seed) {
+    chosen.add(seed.id);
+    const close = db
+      .prepare('SELECT to_id FROM relationships WHERE world_id = ? AND from_id = ? AND abs(score) >= 30 ORDER BY abs(score) DESC LIMIT 6')
+      .all(worldId, seed.id)
+      .map((r) => r.to_id)
+      .filter((cid) => byId.has(cid));
+    for (const cid of sample(close, Math.ceil(n / 2))) chosen.add(cid);
+  }
+  const hot = db
+    .prepare("SELECT involved FROM storylines WHERE world_id = ? AND status = 'active' ORDER BY heat DESC LIMIT 4")
+    .all(worldId)
+    .flatMap((s) => JSON.parse(s.involved || '[]'))
+    .filter((cid) => byId.has(cid));
+  for (const cid of sample([...new Set(hot)], Math.ceil(n / 3))) if (chosen.size < n) chosen.add(cid);
+  for (const c of sample(pool.filter((c) => !chosen.has(c.id)), n - chosen.size)) chosen.add(c.id);
+  return [...chosen].slice(0, n).map((cid) => byId.get(cid));
 }
 
 /** Maps a post id (root or reply) to the root id of its thread, within this world only. */

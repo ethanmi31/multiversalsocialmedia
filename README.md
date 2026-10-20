@@ -33,6 +33,7 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
      - It skims the lorebook to find the character entries, reading titles and first lines only. Entries already categorized "Character" or "Location" cost nothing, and the results are remembered so only new or edited entries get skimmed next time.
      - It picks the characters that match and writes account details that follow your username rules. Each character's lorebook entry becomes their description word-for-word.
      - Characters already on the platform are skipped, and you review everything before it's added. The Director can do this too.
+   - **Who knows who:** for each character, the cheap model reads every lorebook entry about them, within a size limit. From that it records what they know (their universe and variant, events they lived through, people they've met, crossovers included) and their relationships with the other accounts. This knowledge is always part of the character rather than depending on keywords. It runs automatically for characters added from the lorebook, and **Learn from lore for all characters** re-runs it after you add more people. You can edit "What they know" in each character's editor.
    - **Generate random users** follows your random-user instructions.
    - The toggles control who is currently on the platform.
 4. **You are…** Pick which persona you're using in the sidebar.

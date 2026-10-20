@@ -1,4 +1,5 @@
-import { db, tx } from './db.js';
+import { db, tx, estimateTokens } from './db.js';
+import { applyUpdates } from './worldstate.js';
 import { completeJSON, httpError } from './openrouter.js';
 import { getWorld, insertCharacter, makeHandle, npcRules, ACCOUNT_FIELDS, clip, knownNames } from './engine.js';
 
@@ -45,7 +46,7 @@ async function skim(worldId, job = {}) {
             {
               role: 'system',
               content: `You skim lorebook entries. Decide which entries are mainly about ONE specific individual character (a person or being who could have a social-media account), as opposed to places, groups, items, events, species or concepts.
-For each character entry, give its id and the character's name as the lore names them (include a variant/universe label if the entry is about a specific variant).
+For each character entry, give its id and the character's name as the lore names them. Many characters exist as several variants across universes with the same base name: ALWAYS include the variant/universe label when the entry (or its title/group) shows one, e.g. "Portal Ethan", "Prime Lucas", "Ethan (UTDR Noir)" — never just "Ethan" if a label is available.
 Return ONLY JSON: {"characters":[{"id":number,"name":string}]} — entries you leave out are treated as not characters.`
             },
             { role: 'user', content: batch.map((e) => `#${e.id} ${e.title}${e.category ? ` [${e.category}]` : ''}: ${clip(e.content.replace(/\s+/g, ' '), 160)}`).join('\n') }
@@ -69,7 +70,9 @@ Return ONLY JSON: {"characters":[{"id":number,"name":string}]} — entries you l
 function candidates(worldId) {
   const existing = db.prepare('SELECT name, real_name, lore_entry_id FROM characters WHERE world_id = ?').all(worldId);
   const linked = new Set(existing.map((c) => c.lore_entry_id).filter(Boolean));
-  const names = new Set(existing.flatMap(knownNames).map((n) => n.toLowerCase()));
+  // Characters added from the lorebook are matched by their entry; several variants can share a name
+  // (every universe has an Ethan), so names only rule out entries for characters you created by hand.
+  const names = new Set(existing.filter((c) => !c.lore_entry_id).flatMap(knownNames).map((n) => n.toLowerCase()));
   return db
     .prepare('SELECT * FROM lore_entries WHERE world_id = ? AND is_character = 1 AND enabled = 1 ORDER BY priority DESC, id')
     .all(worldId)
@@ -166,18 +169,126 @@ export async function previewFromLore(worldId, request, job = {}) {
   return { previews: await draftAccounts(worldId, chosen, job), skimmed, unskimmed, totalCharacters: total, available: pool.length };
 }
 
-// Background jobs, so a big lorebook shows progress instead of one long silent request.
+// ---------------------------------------------------------------------------
+// Knowledge: what each character knows and who they know, gathered from every entry about them
+// ---------------------------------------------------------------------------
+
+const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const count = (text, re) => (text.match(re) || []).length;
+
+/** "Portal Ethan" -> { base: ['Portal', 'Ethan'], label: 'Portal' }; "Ethan (UTDR Noir)" -> { base: ['Ethan'], label: 'UTDR Noir' } */
+function nameParts(name) {
+  const paren = name.match(/^(.*?)\s*[([](.+?)[)\]]\s*$/);
+  const core = (paren ? paren[1] : name).trim();
+  const words = core.split(/\s+/).filter((w) => w.length >= 3);
+  return { base: [words[0], words[words.length - 1]].filter(Boolean), label: paren ? paren[2] : words.length > 1 ? words.slice(0, -1).join(' ') : '' };
+}
+
+/** Lore entries about this character, most relevant first, within a token budget. */
+function entriesAbout(worldId, c, budget = 6000) {
+  const own = c.lore_entry_id ? db.prepare('SELECT * FROM lore_entries WHERE id = ? AND world_id = ?').get(c.lore_entry_id, worldId) : null;
+  const full = [...new Set([...knownNames(c), own?.character_name, own?.title].filter((n) => n && n.trim().length >= 3))];
+  const parts = full.map(nameParts);
+  const fullRe = full.map((n) => new RegExp(`\\b${esc(n)}\\b`, 'gi'));
+  const baseRe = [...new Set(parts.flatMap((p) => p.base))].map((b) => new RegExp(`\\b${esc(b)}\\b`, 'gi'));
+  const labelRe = [...new Set(parts.map((p) => p.label).filter((l) => l.length >= 3))].map((l) => new RegExp(`\\b${esc(l)}\\b`, 'i'));
+
+  const scored = [];
+  for (const e of db.prepare('SELECT * FROM lore_entries WHERE world_id = ? AND enabled = 1').all(worldId)) {
+    if (own && e.id === own.id) continue;
+    const hay = `${e.title}\n${e.keys}\n${e.content}`;
+    const fullHits = fullRe.reduce((a, re) => a + count(hay, re), 0);
+    const baseHits = Math.min(3, baseRe.reduce((a, re) => a + count(hay, re), 0));
+    if (!fullHits && !baseHits) continue;
+    const label = labelRe.some((re) => re.test(hay)) ? 2 : 0;
+    const titled = fullRe.some((re) => { re.lastIndex = 0; return re.test(`${e.title} ${e.keys}`); }) ? 5 : 0;
+    fullRe.forEach((re) => (re.lastIndex = 0));
+    scored.push({ e, score: titled + fullHits * 3 + baseHits + label });
+  }
+  scored.sort((a, b) => b.score - a.score || b.e.priority - a.e.priority);
+  const picked = own ? [own] : [];
+  let used = own ? estimateTokens(own.content) : 0;
+  for (const { e } of scored) {
+    const t = estimateTokens(e.content);
+    if (used + t > budget) continue;
+    picked.push(e);
+    used += t;
+  }
+  return picked;
+}
+
+async function learnOne(worldId, c, accounts) {
+  const world = getWorld(worldId);
+  const entries = entriesAbout(worldId, c);
+  if (!entries.length && !c.persona) return false;
+  const who = c.real_name || c.name;
+  const out = await completeJSON({
+    task: 'learn-knowledge',
+    expect: 'relationships',
+    maxTokens: 1500,
+    temperature: 0.3,
+    messages: [
+      {
+        role: 'system',
+        content: `You build the long-term knowledge of ONE character on the social network of the universe "${world.name}", from lorebook excerpts.
+Many characters exist as several variants across universes with the same name. Some excerpts may be about OTHER variants: only use what applies to THIS character — but DO include other variants and people this character has actually met, fought beside, or knows about (crossovers count).
+"knowledge": bullet points, max ~180 words, written as facts they know: which universe/variant they are and what they know about their place in the multiverse; the major events they lived through; the important people in their life and how they know them; secrets they know.
+"relationships": one item per person on the ACCOUNTS list this character knows — "status" = how they know them and how they feel (short), "score" -100 (hatred) to 100 (devotion). Only use handles from the ACCOUNTS list; never the character themself.
+Return ONLY JSON: {"knowledge":string,"relationships":[{"handle":string,"status":string,"score":number}]}`
+      },
+      {
+        role: 'user',
+        content: [
+          `THE CHARACTER: ${c.name} (@${c.handle})${who !== c.name ? `, real name ${who}` : ''}${c.bio ? ` — bio: ${c.bio}` : ''}\n${clip(c.persona || '', 1500)}`,
+          `ACCOUNTS ON THE PLATFORM:\n${accounts.filter((a) => a.id !== c.id).map((a) => `@${a.handle} — ${a.real_name || a.name}${a.bio ? ` — ${clip(a.bio, 60)}` : ''}`).join('\n')}`,
+          `LORE EXCERPTS:\n${entries.map((e) => `[${e.title}]\n${e.content}`).join('\n\n')}`
+        ].join('\n\n')
+      }
+    ]
+  });
+  db.prepare('UPDATE characters SET knowledge = ? WHERE id = ?').run(String(out.knowledge || '').trim(), c.id);
+  applyUpdates(worldId, { relationships: out.relationships.filter((r) => r?.handle).map((r) => ({ ...r, from: c.handle, to: r.handle })) }, 'lore');
+  return true;
+}
+
+/** Learns knowledge + relationships for the given characters (all characters if ids is empty). */
+export async function learnFromLore(worldId, ids = [], job = {}) {
+  const accounts = db.prepare('SELECT id, name, real_name, handle, bio FROM characters WHERE world_id = ?').all(worldId);
+  const wanted = new Set(ids.map(Number));
+  const targets = db.prepare('SELECT * FROM characters WHERE world_id = ?').all(worldId).filter((c) => !wanted.size || wanted.has(c.id));
+  Object.assign(job, { phase: 'learning', done: 0, total: targets.length });
+  let next = 0;
+  let learned = 0;
+  const worker = async () => {
+    while (next < targets.length) {
+      const c = targets[next++];
+      try {
+        if (await learnOne(worldId, c, accounts)) learned++;
+      } catch (e) {
+        job.errors?.push(`@${c.handle}: ${e.message}`);
+      }
+      job.done++;
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  return { learned, total: targets.length };
+}
+
+// Background jobs, so big lorebooks show progress instead of one long silent request.
 const jobs = new Map();
 let jobSeq = 0;
 
-export function startFromLoreJob(worldId, request) {
+function startJob(worldId, run) {
   const job = { id: ++jobSeq, worldId, status: 'running', phase: 'starting', done: 0, total: 0, errors: [], result: null };
   jobs.set(job.id, job);
-  previewFromLore(worldId, request, job)
+  run(job)
     .then((result) => Object.assign(job, { status: 'done', result }))
     .catch((e) => Object.assign(job, { status: 'error', errors: [...job.errors, e.message] }));
   return job;
 }
+
+export const startFromLoreJob = (worldId, request) => startJob(worldId, (job) => previewFromLore(worldId, request, job));
+export const startLearnJob = (worldId, ids) => startJob(worldId, (job) => learnFromLore(worldId, ids, job));
 
 export function getFromLoreJob(id) {
   return jobs.get(Number(id)) || null;
@@ -186,7 +297,9 @@ export function getFromLoreJob(id) {
 /** Used by the Director: preview and create in one go. */
 export async function addFromLore(worldId, request, kind = 'custom') {
   const { previews } = await previewFromLore(worldId, request);
-  return previews.map((p) => insertCharacter(worldId, { ...p, persona: p.description, kind }));
+  const made = previews.map((p) => insertCharacter(worldId, { ...p, persona: p.description, kind }));
+  if (made.length) await learnFromLore(worldId, made.map((c) => c.id));
+  return made;
 }
 
 /** Forget skim results so every entry is re-checked (e.g. after a big lorebook change). */

@@ -14,7 +14,7 @@ import { conversationMembers, pickResponder, streamReply, observeConversation, f
 import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
 import { directorChat, directorState } from './director.js';
-import { startFromLoreJob, getFromLoreJob, resetSkim } from './canon.js';
+import { startFromLoreJob, startLearnJob, getFromLoreJob, resetSkim } from './canon.js';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -258,7 +258,7 @@ api.delete('/director/notes/:id', (req, res) => {
 });
 
 // ---------------------------------------------------------------- characters
-const CHAR_FIELDS = ['kind', 'name', 'real_name', 'handle', 'bio', 'persona', 'style', 'color', 'active', 'followers'];
+const CHAR_FIELDS = ['kind', 'name', 'real_name', 'handle', 'bio', 'persona', 'style', 'color', 'active', 'followers', 'knowledge'];
 
 api.get('/worlds/:id/characters', (req, res) => {
   res.json(
@@ -284,6 +284,8 @@ api.post('/worlds/:id/characters/from-lore', (req, res) => {
   if (req.body.rescan) resetSkim(id(req.params.id));
   res.json(startFromLoreJob(id(req.params.id), req.body.request));
 });
+/** Learn what characters know and who they know from the lorebook (all characters if no ids). */
+api.post('/worlds/:id/characters/learn', (req, res) => res.json(startLearnJob(id(req.params.id), req.body.ids || [])));
 api.get('/worlds/:id/characters/from-lore/:job', (req, res) => {
   const job = getFromLoreJob(req.params.job);
   if (!job || job.worldId !== id(req.params.id)) throw httpError(404, 'Job not found');

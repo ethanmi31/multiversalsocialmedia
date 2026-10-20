@@ -2,6 +2,41 @@ import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { Avatar, KindBadge, AsyncButton, fmtCount } from '../components.jsx';
 
+/** Polls a background job until it finishes, reporting progress. */
+async function runJob(worldId, start, onProgress) {
+  let job = await start;
+  onProgress(job);
+  while (job.status === 'running') {
+    await new Promise((r) => setTimeout(r, 1200));
+    job = await api.get(`/worlds/${worldId}/characters/from-lore/${job.id}`);
+    onProgress(job);
+  }
+  onProgress(null);
+  if (job.status === 'error') throw new Error(job.errors[job.errors.length - 1] || 'Something went wrong');
+  return job;
+}
+
+const PHASES = {
+  starting: () => 'Starting…',
+  skimming: (j) => `Skimming the lorebook for characters… batch ${j.done} / ${j.total}`,
+  picking: () => 'Picking the characters you asked for…',
+  drafting: (j) => `Writing their accounts… ${j.done} / ${j.total}`,
+  learning: (j) => `Reading the lore to learn who they know… ${j.done} / ${j.total} characters`
+};
+
+function JobProgress({ job }) {
+  if (!job) return null;
+  return (
+    <div className="progress-wrap">
+      <div className="progress"><div style={{ width: `${job.total ? Math.max(4, (job.done / job.total) * 100) : 4}%` }} /></div>
+      <div className="small muted">
+        {(PHASES[job.phase] || PHASES.starting)(job)}
+        {job.errors.length > 0 && <span className="error-text"> · {job.errors.length} problem(s), continuing</span>}
+      </div>
+    </div>
+  );
+}
+
 const BLANK = { name: '', real_name: '', handle: '', bio: '', persona: '', kind: 'custom', followers: '' };
 const KIND_LABEL = { all: 'All', player: 'You play', custom: 'Your characters', generated: 'AI generated' };
 
@@ -39,16 +74,16 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
   const [lorePreview, setLorePreview] = useState(null);
   const [loreJob, setLoreJob] = useState(null);
 
-  async function findFromLore() {
-    let job = await api.post(`/worlds/${worldId}/characters/from-lore`, { request: loreRequest });
-    setLoreJob(job);
-    while (job.status === 'running') {
-      await new Promise((r) => setTimeout(r, 1200));
-      job = await api.get(`/worlds/${worldId}/characters/from-lore/${job.id}`);
-      setLoreJob(job);
-    }
-    setLoreJob(null);
-    if (job.status === 'error') throw new Error(job.errors[job.errors.length - 1] || 'Something went wrong');
+  const [learnJob, setLearnJob] = useState(null);
+
+  async function learn(ids = []) {
+    const job = await runJob(worldId, api.post(`/worlds/${worldId}/characters/learn`, { ids }), setLearnJob);
+    notify(`Learned what ${job.result.learned} character(s) know and who they know` + (job.errors.length ? ` · problems: ${job.errors.slice(0, 2).join(' · ')}` : ''), job.errors.length ? 'error' : 'info');
+    load();
+  }
+
+  async function findFromLore(rescan = false) {
+    const job = await runJob(worldId, api.post(`/worlds/${worldId}/characters/from-lore`, { request: loreRequest, rescan }), setLoreJob);
     const r = job.result;
     if (job.errors.length) notify(`Finished with problems: ${job.errors.slice(0, 2).join(' · ')}${r.unskimmed ? ` — ${r.unskimmed} entries couldn't be checked yet; run it again to retry them.` : ''}`, 'error');
     if (!r.previews.length) {
@@ -101,17 +136,24 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
           <input value={loreRequest} onChange={(e) => setLoreRequest(e.target.value)} style={{ flex: 1, minWidth: 260 }}
             placeholder="e.g. add 5 characters from the stories · add all the characters · add the villains"
             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.nextSibling?.click(); }} />
-          <AsyncButton className="primary" notify={notify} busyLabel="Working…" onClick={findFromLore}>Find characters</AsyncButton>
+          <AsyncButton className="primary" notify={notify} busyLabel="Working…" onClick={() => findFromLore()}>Find characters</AsyncButton>
         </div>
-        {loreJob && (
-          <div className="progress-wrap">
-            <div className="progress"><div style={{ width: `${loreJob.total ? Math.max(4, (loreJob.done / loreJob.total) * 100) : 4}%` }} /></div>
-            <div className="small muted">
-              {{ starting: 'Starting…', skimming: `Skimming the lorebook for characters… batch ${loreJob.done} / ${loreJob.total}`, picking: 'Picking the characters you asked for…', drafting: `Writing their accounts… ${loreJob.done} / ${loreJob.total}` }[loreJob.phase]}
-              {loreJob.errors.length > 0 && <span className="error-text"> · {loreJob.errors.length} problem(s), continuing</span>}
-            </div>
-          </div>
-        )}
+        <div className="small" style={{ marginTop: 6 }}>
+          <AsyncButton className="link" notify={notify} title="Forget which entries are characters and check the whole lorebook again (use after big lorebook changes)"
+            onClick={() => findFromLore(true)}>Re-skim the whole lorebook</AsyncButton>
+        </div>
+        <JobProgress job={loreJob} />
+        <JobProgress job={learnJob} />
+      </section>
+
+      <section className="card">
+        <h2>Who knows who</h2>
+        <p className="muted small">
+          Reads every lorebook entry about each character (cheap utility model) to learn what they know — their universe, the events they lived through,
+          the people they've met — and their relationships with the other accounts. This is always part of the character, so it doesn't depend on keywords.
+          It runs automatically for characters added from the lorebook; run it again after adding characters so everyone knows each other.
+        </p>
+        <AsyncButton notify={notify} busyLabel="Learning…" disabled={!!learnJob} onClick={() => learn()}>Learn from lore for all characters</AsyncButton>
       </section>
 
       <section className="card">
@@ -181,7 +223,7 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
       )}
       {lorePreview && (
         <FromLorePreview worldId={worldId} data={lorePreview} notify={notify} onClose={() => setLorePreview(null)}
-          onDone={() => { setLorePreview(null); setLoreRequest(''); load(); }} />
+          onDone={(made) => { setLorePreview(null); setLoreRequest(''); load(); if (made.length) learn(made.map((c) => c.id)).catch((e) => notify(e.message, 'error')); }} />
       )}
       {importing && <BulkImport worldId={worldId} notify={notify} onClose={() => setImporting(false)} onDone={() => { setImporting(false); load(); }} />}
     </div>
@@ -216,6 +258,9 @@ function CharacterEditor({ worldId, initial, notify, onClose, onSaved }) {
           <DropText value={c.persona} onChange={(v) => setC({ ...c, persona: v })} notify={notify} rows={12}
             placeholder="Paste or drop your character description here — personality, history, relationships, how they talk, anything. Any format." />
           <span className="muted small">~{Math.ceil((c.persona || '').length / 4)} tokens. Sent in full in DMs and scenes, shortened in feed batches.</span>
+        </label>
+        <label>What they know <span className="muted">(from the lore — always part of them; edit freely)</span>
+          <textarea rows={5} value={c.knowledge || ''} onChange={set('knowledge')} placeholder="Filled in by “Learn from lore”, or write it yourself: their universe, people they know, events they lived through." />
         </label>
         {c.style && (
           <label>Voice notes (from older versions)<input value={c.style} onChange={set('style')} /></label>
@@ -298,8 +343,8 @@ function FromLorePreview({ worldId, data, notify, onClose, onDone }) {
             </select>
             <AsyncButton className="primary" notify={notify} disabled={!chosen.length} onClick={async () => {
               const made = await api.post(`/worlds/${worldId}/characters/import`, { characters: chosen, kind });
-              notify(`Added ${made.length} characters`);
-              onDone();
+              notify(`Added ${made.length} characters — now learning who they know…`);
+              onDone(made);
             }}>Add {chosen.length}</AsyncButton>
           </div>
         </div>
