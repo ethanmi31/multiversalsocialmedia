@@ -14,6 +14,7 @@ import { conversationMembers, pickResponder, streamReply, observeConversation, f
 import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
 import { directorChat, directorState } from './director.js';
+import { previewFromLore, resetSkim } from './canon.js';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -161,7 +162,7 @@ api.post('/worlds/:id/lore', (req, res) => {
 api.put('/lore/:id', (req, res) => {
   const e = req.body;
   const keys = Array.isArray(e.keys) ? e.keys : String(e.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-  db.prepare('UPDATE lore_entries SET title = ?, keys = ?, content = ?, category = ?, constant = ?, priority = ?, enabled = ?, tokens = ? WHERE id = ?').run(
+  db.prepare('UPDATE lore_entries SET title = ?, keys = ?, content = ?, category = ?, constant = ?, priority = ?, enabled = ?, tokens = ?, is_character = NULL WHERE id = ?').run(
     e.title, JSON.stringify(keys), e.content || '', e.category || '', e.constant ? 1 : 0, Number(e.priority) || 0, e.enabled ? 1 : 0, estimateTokens(e.content), id(req.params.id)
   );
   res.json({ ok: true });
@@ -277,6 +278,11 @@ api.post('/worlds/:id/characters/split', async (req, res) => {
   const text = String(req.body.text || '');
   if (!text.trim()) throw httpError(400, 'Paste or drop some character descriptions first.');
   res.json(req.body.mode === 'ai' ? await splitCharactersAI(id(req.params.id), text) : splitCharactersFree(text));
+});
+/** Characters from the lorebook: skim entries, pick per the request, preview accounts (nothing created yet). */
+api.post('/worlds/:id/characters/from-lore', async (req, res) => {
+  if (req.body.rescan) resetSkim(id(req.params.id));
+  res.json(await previewFromLore(id(req.params.id), req.body.request));
 });
 /** Step 2: create the reviewed characters. */
 api.post('/worlds/:id/characters/import', (req, res) => {

@@ -85,8 +85,8 @@ export function insertCharacter(worldId, c) {
   const handle = uniqueHandle(worldId, c.handle || handleSeed(c));
   const followers = c.followers !== '' && c.followers != null && Number.isFinite(Number(c.followers)) ? Number(c.followers) : defaultFollowers();
   const r = db
-    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active, followers, real_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(worldId, c.kind || 'custom', String(c.name).trim(), handle, c.bio || '', c.persona || c.description || '', c.style || '', c.color || colorFor(c.name), c.active === 0 || c.active === false ? 0 : 1, followers, String(c.realName ?? c.real_name ?? '').trim());
+    .prepare('INSERT INTO characters (world_id, kind, name, handle, bio, persona, style, color, active, followers, real_name, lore_entry_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(worldId, c.kind || 'custom', String(c.name).trim(), handle, c.bio || '', c.persona || c.description || '', c.style || '', c.color || colorFor(c.name), c.active === 0 || c.active === false ? 0 : 1, followers, String(c.realName ?? c.real_name ?? '').trim(), Number(c.lore_entry_id) || null);
   return db.prepare('SELECT * FROM characters WHERE id = ?').get(r.lastInsertRowid);
 }
 
@@ -113,13 +113,13 @@ export function personaBlock(ps) {
 // ---------------------------------------------------------------------------
 
 /** The author's own rules for what kind of random users this universe has. */
-const npcRules = (world) =>
+export const npcRules = (world) =>
   world.npc_instructions?.trim()
     ? `THE AUTHOR'S INSTRUCTIONS FOR GENERATING USERS (follow these exactly, they override the defaults). When the author says "username" or "name" they mean the display name ("name" field); only "handle" or "@" means the handle:\n${world.npc_instructions.trim()}`
     : '';
 
 /** What each field of a generated account means. Kept universe-neutral: formats come from the author's instructions. */
-const ACCOUNT_FIELDS = `Field meanings:
+export const ACCOUNT_FIELDS = `Field meanings:
 - "name": the DISPLAY NAME shown on their profile — what people call their username. Like real people online it is usually a nickname, alias, joke or stylized name (lowercase, emoji and symbols are fine), NOT their full legal name. Only celebrities, officials, businesses and news accounts use their real name. Anything the author wants added to usernames goes here.
 - "handle": the @handle. Short (max 15 chars), lowercase letters, numbers and underscores only, no spaces. Keep it clean: nothing extra unless the author explicitly asks for it in the handle.
 - "realName": their actual full name (private; used for continuity, not shown on posts).`;

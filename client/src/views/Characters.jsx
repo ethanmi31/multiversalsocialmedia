@@ -35,6 +35,8 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
   const [chars, setChars] = useState([]);
   const [editing, setEditing] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [loreRequest, setLoreRequest] = useState('');
+  const [lorePreview, setLorePreview] = useState(null);
   const [genCount, setGenCount] = useState(5);
   const [genTheme, setGenTheme] = useState('');
   const [filter, setFilter] = useState('all');
@@ -68,6 +70,27 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
           <button className="primary" onClick={() => setEditing({ ...BLANK })}>+ New character</button>
         </div>
       </header>
+
+      <section className="card">
+        <h2>Add characters from your lorebook</h2>
+        <p className="muted small">
+          Say who you want, in your own words. It skims your lorebook entries (just titles and the first lines, cheap, and remembered for next time) to find the characters,
+          then their entries become their descriptions. Characters already on the platform are skipped. You review everything before it's added.
+        </p>
+        <div className="row wrap">
+          <input value={loreRequest} onChange={(e) => setLoreRequest(e.target.value)} style={{ flex: 1, minWidth: 260 }}
+            placeholder="e.g. add 5 characters from the stories · add all the characters · add the villains"
+            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.nextSibling?.click(); }} />
+          <AsyncButton className="primary" notify={notify} busyLabel="Skimming lorebook…" onClick={async () => {
+            const r = await api.post(`/worlds/${worldId}/characters/from-lore`, { request: loreRequest });
+            if (!r.previews.length) {
+              notify(r.totalCharacters ? `All ${r.totalCharacters} characters in the lorebook are already on the platform.` : 'No characters found in the lorebook.');
+              return;
+            }
+            setLorePreview(r);
+          }}>Find characters</AsyncButton>
+        </div>
+      </section>
 
       <section className="card">
         <h2>Generate random users</h2>
@@ -134,6 +157,10 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
       {editing && (
         <CharacterEditor worldId={worldId} initial={editing} notify={notify} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load(); }} />
       )}
+      {lorePreview && (
+        <FromLorePreview worldId={worldId} data={lorePreview} notify={notify} onClose={() => setLorePreview(null)}
+          onDone={() => { setLorePreview(null); setLoreRequest(''); load(); }} />
+      )}
       {importing && <BulkImport worldId={worldId} notify={notify} onClose={() => setImporting(false)} onDone={() => { setImporting(false); load(); }} />}
     </div>
   );
@@ -198,6 +225,60 @@ function CharacterEditor({ worldId, initial, notify, onClose, onSaved }) {
           <div className="row">
             <button onClick={onClose}>Cancel</button>
             <AsyncButton className="primary" notify={notify} onClick={save}>Save</AsyncButton>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FromLorePreview({ worldId, data, notify, onClose, onDone }) {
+  const [list, setList] = useState(data.previews);
+  const [kind, setKind] = useState('custom');
+  const [open, setOpen] = useState(null);
+  const edit = (i, k, v) => setList(list.map((c, j) => (j === i ? { ...c, [k]: v } : c)));
+  const chosen = list.filter((c) => !c.skip);
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal wide" onClick={(e) => e.stopPropagation()}>
+        <h2>Characters from your lorebook</h2>
+        <p className="muted small">
+          Picked {list.length} of {data.available} available ({data.totalCharacters} characters found in the lorebook{data.skimmed ? `, ${data.skimmed} entries skimmed just now` : ''}).
+          Edit anything, untick ones you don't want.
+        </p>
+        <div className="import-list">
+          {list.map((c, i) => (
+            <div key={c.lore_entry_id} className={`import-row ${c.skip ? 'inactive' : ''}`}>
+              <div className="row">
+                <input type="checkbox" checked={!c.skip} onChange={(e) => edit(i, 'skip', !e.target.checked)} />
+                <input value={c.name} onChange={(e) => edit(i, 'name', e.target.value)} placeholder="Display name" title="Display name (username)" />
+                <input value={c.handle} onChange={(e) => edit(i, 'handle', e.target.value)} placeholder="handle" style={{ maxWidth: 150 }} title="@handle" />
+                <button className="link" onClick={() => setOpen(open === i ? null : i)}>{open === i ? 'hide' : 'details'}</button>
+              </div>
+              <input value={c.bio} onChange={(e) => edit(i, 'bio', e.target.value)} placeholder="Profile bio" />
+              {open === i && (
+                <>
+                  <input value={c.real_name} onChange={(e) => edit(i, 'real_name', e.target.value)} placeholder="Real name" />
+                  <textarea rows={8} value={c.description} onChange={(e) => edit(i, 'description', e.target.value)} />
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="row space">
+          <button onClick={onClose}>Cancel</button>
+          <div className="row">
+            <select value={kind} onChange={(e) => setKind(e.target.value)}>
+              <option value="custom">Add as: your characters (AI plays them)</option>
+              <option value="player">Add as: your personas (you play them)</option>
+              <option value="generated">Add as: background users</option>
+            </select>
+            <AsyncButton className="primary" notify={notify} disabled={!chosen.length} onClick={async () => {
+              const made = await api.post(`/worlds/${worldId}/characters/import`, { characters: chosen, kind });
+              notify(`Added ${made.length} characters`);
+              onDone();
+            }}>Add {chosen.length}</AsyncButton>
           </div>
         </div>
       </div>

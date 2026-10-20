@@ -2,6 +2,7 @@ import { db, getSettings, tx } from './db.js';
 import { completeJSON, httpError } from './openrouter.js';
 import { getWorld, worldPreamble, knownNames, clip, escapeRe } from './engine.js';
 import { applyUpdates, resolver, ago } from './worldstate.js';
+import { addFromLore } from './canon.js';
 
 // The Director is the author's out-of-character channel to the engine for ONE universe.
 // It answers questions about what the engine is tracking, records standing corrections ("notes")
@@ -71,6 +72,7 @@ You can change things with "actions":
 - {"type":"add_memory","handle":string,"memory":string} — e.g. to record where someone is now
 - {"type":"set_relationship","from":handle,"to":handle,"status":string,"score":-100..100} / {"type":"remove_relationship","from":handle,"to":handle}
 - {"type":"set_active","handle":string,"active":boolean} — take an account off the platform or bring it back
+- {"type":"add_characters_from_lore","request":string} — create accounts for characters from this universe's lorebook/stories, e.g. "5 characters from the stories", "all the characters", "the villains". Pass the author's wording.
 
 Guidelines:
 - Usually do both: fix the current state AND add a note so it doesn't happen again — unless the author only wants a one-off fix.
@@ -101,7 +103,7 @@ export async function directorChat(worldId, message) {
     ]
   });
 
-  const applied = applyActions(worldId, Array.isArray(out.actions) ? out.actions : []);
+  const applied = await applyActions(worldId, Array.isArray(out.actions) ? out.actions : []);
   const reply = String(out.reply || (applied.length ? 'Done.' : 'Okay.')).trim();
   tx(() => {
     db.prepare("INSERT INTO director_messages (world_id, role, content) VALUES (?, 'user', ?)").run(worldId, text);
@@ -111,7 +113,7 @@ export async function directorChat(worldId, message) {
 }
 
 /** Applies the director's actions. Every id and handle is checked against this universe; anything else is ignored. */
-function applyActions(worldId, actions) {
+async function applyActions(worldId, actions) {
   const find = resolver(worldId);
   const done = [];
   const own = (table, id) => db.prepare(`SELECT * FROM ${table} WHERE id = ? AND world_id = ?`).get(Number(id), worldId);
@@ -191,6 +193,11 @@ function applyActions(worldId, actions) {
           if (!f || !t) break;
           db.prepare('DELETE FROM relationships WHERE world_id = ? AND from_id = ? AND to_id = ?').run(worldId, f.id, t.id);
           done.push(`Cleared how @${f.handle} feels about @${t.handle}`);
+          break;
+        }
+        case 'add_characters_from_lore': {
+          const made = await addFromLore(worldId, a.request || 'all');
+          done.push(made.length ? `Added ${made.length} character${made.length === 1 ? '' : 's'} from the lorebook: ${made.map((c) => '@' + c.handle).join(', ')}` : 'No new characters from the lorebook to add');
           break;
         }
         case 'set_active': {

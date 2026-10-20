@@ -200,7 +200,10 @@ addColumn('conversations', 'unread', 'INTEGER DEFAULT 0');
 addColumn('worlds', 'last_tick_at', 'TEXT');
 addColumn('worlds', 'npc_instructions', "TEXT DEFAULT ''"); // how random users should be generated
 addColumn('storylines', 'visibility', "TEXT DEFAULT 'public'"); // private = only the people involved know
-addColumn('characters', 'real_name', "TEXT DEFAULT ''"); // who they really are; `name` is the display name on their profile
+addColumn('characters', 'real_name', "TEXT DEFAULT ''");
+addColumn('characters', 'lore_entry_id', 'INTEGER');          // the lorebook entry this character was created from
+addColumn('lore_entries', 'is_character', 'INTEGER');         // NULL = not skimmed yet, 1 = describes a character, 0 = doesn't
+addColumn('lore_entries', 'character_name', "TEXT DEFAULT ''"); // who they really are; `name` is the display name on their profile
 
 export const DEFAULT_SETTINGS = {
   apiKey: '',

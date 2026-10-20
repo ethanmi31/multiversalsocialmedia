@@ -29,6 +29,10 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - Add characters with **Name, Handle, Bio and Description**. Paste a description in, or drop a file onto the box.
    - **Bulk import** splits one document of many descriptions into characters. Use the free heading split, or the cheap AI split, which also suggests handles and bios. You review everything before importing.
    - Mark your own characters **"You play"**. The AI never writes posts, replies, DMs or actions for them.
+   - **Add characters from your lorebook:** ask in your own words ("add 5 characters from the stories", "add all the characters", "add the villains").
+     - It skims the lorebook to find the character entries, reading titles and first lines only. Entries already categorized "Character" or "Location" cost nothing, and the results are remembered so only new or edited entries get skimmed next time.
+     - It picks the characters that match and writes account details that follow your username rules. Each character's lorebook entry becomes their description word-for-word.
+     - Characters already on the platform are skipped, and you review everything before it's added. The Director can do this too.
    - **Generate random users** follows your random-user instructions.
    - The toggles control who is currently on the platform.
 4. **You are…** Pick which persona you're using in the sidebar.
