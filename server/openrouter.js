@@ -19,6 +19,20 @@ export function httpError(status, message) {
   return e;
 }
 
+/** What has been spent today (local time), as reported by OpenRouter. */
+export function spentToday() {
+  return db.prepare("SELECT COALESCE(SUM(cost), 0) AS c FROM usage_log WHERE date(created_at, 'localtime') = date('now', 'localtime')").get().c;
+}
+
+/** Refuses new AI calls once the daily spending limit is reached. */
+function checkBudget(limit) {
+  if (!(limit > 0)) return;
+  const spent = spentToday();
+  if (spent >= limit) {
+    throw httpError(402, `Daily spending limit reached: $${spent.toFixed(4)} of $${Number(limit).toFixed(2)} spent today. Raise or turn off the limit in Settings, or wait until tomorrow.`);
+  }
+}
+
 function logUsage(task, model, usage) {
   if (!usage) return;
   db.prepare(
@@ -34,19 +48,23 @@ function logUsage(task, model, usage) {
 }
 
 const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS) || 180_000;
+const STREAM_IDLE_MS = Number(process.env.OPENROUTER_STREAM_IDLE_MS) || 90_000;
 
 /** timeoutMs covers the whole request including the body; streams pass none (they can legitimately run long). */
-async function post(body, apiKey, timeoutMs) {
+async function post(body, apiKey, timeoutMs, signal) {
+  checkBudget(getSettings().dailySpendLimit);
   let res;
   try {
     res = await fetch(`${BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: headers(apiKey),
       body: JSON.stringify({ ...body, usage: { include: true } }),
-      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : signal
     });
   } catch (e) {
-    throw e.name === 'TimeoutError' ? timeoutError(body.model) : e;
+    if (e.name === 'TimeoutError') throw timeoutError(body.model);
+    if (e.name === 'AbortError') throw e;
+    throw unreachable(e);
   }
   if (!res.ok) {
     const text = await res.text();
@@ -84,6 +102,12 @@ async function request({ task, model, messages, maxTokens, temperature, json = f
   }
   if (!text) throw emptyError(data.model || model, data.choices?.[0]?.finish_reason);
   return { text, finish: data.choices?.[0]?.finish_reason, model: data.model || model };
+}
+
+/** "fetch failed" with a DNS/connection cause means we never reached OpenRouter. */
+function unreachable(e) {
+  const why = e.cause?.code || e.cause?.message || e.message;
+  return httpError(503, `Couldn't reach OpenRouter (${why}). Check your internet connection and try again.`);
 }
 
 function timeoutError(model) {
@@ -178,11 +202,31 @@ export function tryParseJSON(text) {
 export async function stream({ task, model, messages, maxTokens, temperature, onToken, signal }) {
   const s = getSettings();
   model ||= s.chatModel;
-  const res = await post(
-    { model, messages, max_tokens: maxTokens ?? s.maxReplyTokens, temperature: temperature ?? s.temperature, stream: true },
-    s.apiKey
-  );
+  // a stream may run long, but not stall: give up if it doesn't start, or goes quiet mid-reply
+  const started = new AbortController();
+  const startTimer = setTimeout(() => started.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await post(
+      { model, messages, max_tokens: maxTokens ?? s.maxReplyTokens, temperature: temperature ?? s.temperature, stream: true },
+      s.apiKey,
+      null,
+      AbortSignal.any([started.signal, ...(signal ? [signal] : [])])
+    );
+  } catch (e) {
+    if (started.signal.aborted) throw timeoutError(model);
+    throw e;
+  } finally {
+    clearTimeout(startTimer);
+  }
   const reader = res.body.getReader();
+  let stalled = false;
+  let idle;
+  const resetIdle = () => {
+    clearTimeout(idle);
+    idle = setTimeout(() => { stalled = true; reader.cancel().catch(() => {}); }, STREAM_IDLE_MS);
+  };
+  resetIdle();
   const decoder = new TextDecoder();
   let buffer = '';
   let full = '';
@@ -194,6 +238,7 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+    resetIdle();
     buffer += decoder.decode(value, { stream: true });
     let nl;
     while ((nl = buffer.indexOf('\n')) >= 0) {
@@ -215,7 +260,9 @@ export async function stream({ task, model, messages, maxTokens, temperature, on
       }
     }
   }
+  clearTimeout(idle);
   logUsage(task, servedModel, usage);
+  if (stalled) throw httpError(504, `${servedModel} stopped sending its reply partway through. Try again or pick a different model.`);
   if (!full.trim()) throw emptyError(servedModel);
   return { text: full, finish };
 }
@@ -225,7 +272,12 @@ let modelCache = { at: 0, data: null };
 /** Model list with pricing (per-token USD), cached for an hour. */
 export async function listModels() {
   if (modelCache.data && Date.now() - modelCache.at < 3600_000) return modelCache.data;
-  const res = await fetch(`${BASE_URL}/models`);
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}/models`, { signal: AbortSignal.timeout(30_000) });
+  } catch (e) {
+    throw e.name === 'TimeoutError' ? httpError(504, 'OpenRouter took too long to send the model list.') : unreachable(e);
+  }
   if (!res.ok) throw httpError(res.status, 'Could not load the OpenRouter model list.');
   const json = await res.json();
   const data = (json.data || []).map((m) => ({

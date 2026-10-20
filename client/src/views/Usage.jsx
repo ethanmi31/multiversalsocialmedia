@@ -21,8 +21,17 @@ export default function Usage() {
         <button onClick={async () => { if (confirm('Clear usage history?')) { await api.del('/usage'); load(); } }}>Reset</button>
       </header>
       <section className="card">
-        <div className="big-number">{fmtCost(total)}</div>
-        <div className="muted small">total spent, as reported by OpenRouter</div>
+        <div className="row wrap" style={{ gap: 32 }}>
+          <div>
+            <div className="big-number">{fmtCost(u.today)}</div>
+            <div className="muted small">today{u.dailyLimit > 0 ? ` · limit ${fmtCost(u.dailyLimit)}` : ' · no daily limit (set one in Settings)'}</div>
+            {u.dailyLimit > 0 && <div className="progress" style={{ width: 200, marginTop: 6 }}><div style={{ width: `${Math.min(100, (u.today / u.dailyLimit) * 100)}%`, background: u.today >= u.dailyLimit ? 'var(--danger)' : undefined }} /></div>}
+          </div>
+          <div>
+            <div className="big-number">{fmtCost(total)}</div>
+            <div className="muted small">total spent, as reported by OpenRouter</div>
+          </div>
+        </div>
         <table>
           <thead><tr><th>Task</th><th>Calls</th><th>Input</th><th>Cached</th><th>Output</th><th>Cost</th></tr></thead>
           <tbody>

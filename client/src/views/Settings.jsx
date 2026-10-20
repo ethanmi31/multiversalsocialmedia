@@ -15,6 +15,10 @@ const NUMBERS = [
   ['worldStateBudget', 'World-state budget (tokens)', 'Max tokens of storylines, relationships and memories injected per request.']
 ];
 
+const SPENDING = [
+  ['dailySpendLimit', 'Daily spending limit (USD)', 'Once today\'s AI spending reaches this, all AI calls stop until tomorrow (or until you raise it). 0 = no limit. Covers background jobs and Live mode too.']
+];
+
 const LIVENESS = [
   ['dmChance', 'Chance of DMs per tick (0–1)', 'How likely characters are to slide into your DMs each time time passes.'],
   ['viewReplyChance', 'Chance of new replies when opening a thread (0–1)', 'Doubles if your reply there is still unanswered. 3-minute cooldown per thread.'],
@@ -70,6 +74,18 @@ export default function Settings({ settings, notify, onSaved }) {
           {NUMBERS.map(([k, label, hint]) => (
             <label key={k}>{label}
               <input type="number" step={k === 'temperature' ? 0.1 : 1} value={s[k]} onChange={set(k)} />
+              <span className="muted small">{hint}</span>
+            </label>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>Spending</h2>
+        <div className="grid2">
+          {SPENDING.map(([k, label, hint]) => (
+            <label key={k}>{label}
+              <input type="number" step={0.05} min={0} value={s[k]} onChange={set(k)} />
               <span className="muted small">{hint}</span>
             </label>
           ))}

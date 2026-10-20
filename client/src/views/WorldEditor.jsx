@@ -17,7 +17,7 @@ const NPC_EXAMPLE = `Example:
 - Mix of ages; lots of chronically-online teens. Usernames should look like real handles.
 - No other characters from the lore unless I add them myself.`;
 
-export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted }) {
+export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted, selectWorld }) {
   const [w, setW] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [estimate, setEstimate] = useState(null);
@@ -194,6 +194,18 @@ export default function WorldEditor({ worldId, notify, refreshWorlds, onDeleted 
       <Lorebook worldId={worldId} notify={notify} version={w.loreCount} onChange={() => { load(); refreshWorlds(); }} />
 
       <WorldState worldId={worldId} notify={notify} />
+
+      <section className="card">
+        <h2>Backup</h2>
+        <p className="muted small">
+          Save this whole universe — lore, characters, posts, DMs, scenes, memories, drama, communities and Director notes — to one file.
+          Importing a backup always creates a separate copy, so it never overwrites anything.
+        </p>
+        <div className="row wrap">
+          <a className="button" href={`/api/worlds/${worldId}/export`}>Export universe</a>
+          <ImportUniverse notify={notify} onImported={async (w) => { await refreshWorlds(); selectWorld(w.id); }} />
+        </div>
+      </section>
 
       <section className="card danger-zone">
         <AsyncButton notify={notify} className="danger" onClick={async () => {
@@ -382,5 +394,28 @@ function Storyline({ s: initial, notify, onChange }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ImportUniverse({ notify, onImported }) {
+  const ref = useRef();
+  return (
+    <>
+      <input ref={ref} type="file" accept=".json" hidden onChange={async (e) => {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (!file) return;
+        const fd = new FormData();
+        fd.append('file', file);
+        try {
+          const w = await api.post('/worlds/import', fd);
+          notify(`Imported "${w.name}"`);
+          onImported(w);
+        } catch (err) {
+          notify(err.message, 'error');
+        }
+      }} />
+      <button onClick={() => ref.current.click()}>Import a backup…</button>
+    </>
   );
 }

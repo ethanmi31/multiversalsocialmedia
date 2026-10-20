@@ -67,6 +67,10 @@ export function pickResponder(convId) {
   return members.filter((m) => !last || m.id !== last.character_id).sort((a, b) => lastSpoke(a) - lastSpoke(b))[0] || members[0];
 }
 
+/**
+ * Messages not yet folded into the summary. Summaries only run once recentMessages + 8 are pending, so
+ * everything up to that is shown verbatim — otherwise messages between the two would vanish from both.
+ */
 function history(conv, limit) {
   return db
     .prepare(
@@ -115,7 +119,7 @@ function buildDmPrompt(conv, speaker) {
   const members = conversationMembers(conv.id);
   const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
   const others = members.filter((m) => m.id !== speaker.id);
-  const hist = history(conv, s.recentMessages);
+  const hist = history(conv, s.recentMessages + 8);
   const lore = activateLore(conv.world_id, [...hist.slice(-s.scanDepth).map((m) => m.content), ...knownNames(speaker), ...others.flatMap(knownNames)].join('\n'), undefined, { boost: knownNames(speaker) });
 
   const stable = join([
@@ -174,7 +178,7 @@ function buildScenePrompt(conv) {
   const world = getWorld(conv.world_id);
   const npcs = conversationMembers(conv.id).filter((m) => m.kind !== 'player');
   const player = conv.player_id ? db.prepare('SELECT * FROM characters WHERE id = ?').get(conv.player_id) : null;
-  const hist = history(conv, s.recentMessages);
+  const hist = history(conv, s.recentMessages + 8);
   const lore = activateLore(conv.world_id, [conv.setting, ...hist.slice(-s.scanDepth).map((m) => m.content), ...npcs.flatMap(knownNames)].join('\n'), undefined, { boost: npcs.flatMap(knownNames) });
   const you = player ? player.name : 'the user\'s character';
   const others = interestedParties(conv, [conv.setting, ...hist.map((m) => m.content)].join('\n'), npcs);
@@ -226,7 +230,7 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
   const truncated = finish === 'length';
   const members = conversationMembers(convId);
   const lastHuman = db.prepare('SELECT content FROM messages WHERE conversation_id = ? AND is_player = 1 ORDER BY id DESC LIMIT 1').get(convId)?.content;
-  let text = scene ? cleanScene(raw, conv) : cleanReply(raw, speaker, members, conv.player_id, lastHuman);
+  let text = scene ? cleanScene(raw, conv, lastHuman) : cleanReply(raw, speaker, members, conv.player_id, lastHuman);
   if (truncated) text = toLastSentence(text);
   if (!text) throw httpError(502, 'The reply was empty after removing lines written for other people. Try regenerating.');
   const ins = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 0, ?)');
@@ -277,10 +281,18 @@ function cleanReply(text, speaker, members, playerId, lastHumanText = '') {
   return out.trim();
 }
 
-/** Scenes: drop a "Narrator:" label and anything written as the player's own line. */
-function cleanScene(text, conv) {
+/** Scenes: drop a "Narrator:" label, a leading echo of the player's line, and anything written as the player. */
+function cleanScene(text, conv, lastHumanText = '') {
   const player = conv.player_id ? db.prepare('SELECT name FROM characters WHERE id = ?').get(conv.player_id) : null;
-  let out = text.replace(/^\s*\**narrator\**\s*:\s*/i, '');
+  let out = text.trim();
+  if (player) {
+    const theirs = new RegExp(`^\\s*\\**(?:${escapeRe(player.name)}|User|You)\\**\\s*:`, 'i');
+    for (let i = 0; i < 3 && theirs.test(out); i++) out = out.includes('\n') ? out.slice(out.indexOf('\n') + 1).trim() : '';
+  }
+  out = out.replace(/^\s*\**narrator\**\s*:\s*/i, '');
+  const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const firstPara = out.split(/\n\s*\n/)[0];
+  if (lastHumanText && norm(firstPara) === norm(lastHumanText)) out = out.slice(firstPara.length).trim();
   if (player) {
     const cut = out.search(new RegExp(`\\n\\s*\\**${escapeRe(player.name)}\\**\\s*:`, 'i'));
     if (cut > 0) out = out.slice(0, cut);
@@ -298,7 +310,7 @@ function restrictToWitnesses(u, find, witnesses, player, anyPublic) {
   const isPlayer = (h) => player && find(h)?.id === player.id;
   return {
     memories: (u.memories || []).filter((m) => knows(m?.handle)),
-    relationships: (u.relationships || []).filter((r) => knows(r?.from) || isPlayer(r?.from)),
+    relationships: (u.relationships || []).filter((r) => knows(r?.from)), // never how the human's persona feels
     storylines: witnesses.size
       ? (u.storylines || []).map((s) => ({
           ...s,
@@ -309,8 +321,20 @@ function restrictToWitnesses(u, find, witnesses, player, anyPublic) {
   };
 }
 
+const summarizing = new Set();
+
 /** Folds older messages into a rolling summary so the prompt doesn't grow forever. */
 async function maybeSummarize(convId) {
+  if (summarizing.has(convId)) return; // two quick replies must not both fold the same messages
+  summarizing.add(convId);
+  try {
+    await summarize(convId);
+  } finally {
+    summarizing.delete(convId);
+  }
+}
+
+async function summarize(convId) {
   const s = getSettings();
   const conv = getConv(convId);
   const pending = db

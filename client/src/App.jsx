@@ -69,6 +69,21 @@ export default function App() {
   useEffect(() => { store('worldId', worldId); refreshChars(); setProfileId(null); setOpenConv(null); }, [worldId]);
   useEffect(() => store('tab', tab), [tab]);
   useEffect(() => { if (worldId && personaId) store(`persona:${worldId}`, personaId); }, [personaId]);
+  // unread count in the browser tab title
+  useEffect(() => {
+    const unread = worlds.reduce((a, w) => a + (w.unreadNotifications || 0) + (w.unreadMessages || 0), 0);
+    document.title = unread ? `(${unread}) Multiversal` : 'Multiversal';
+  }, [worlds]);
+  // Esc closes the top-most pop-up (every pop-up closes when its backdrop is clicked)
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      const backdrops = document.querySelectorAll('.modal-bg');
+      backdrops[backdrops.length - 1]?.click();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   // keep unread badges fresh (local DB query, no AI cost)
   useEffect(() => {
     const t = setInterval(refreshWorlds, 15000);
@@ -91,6 +106,7 @@ export default function App() {
   const ctx = {
     worldId, world, notify, refreshWorlds, settings, chars, refreshChars, persona, personas,
     goto: setTab,
+    selectWorld: setWorldId,
     openProfile: setProfileId,
     openConversation: (id, kind = 'dm') => { setOpenConv(id); setTab(kind === 'scene' ? 'scenes' : 'chats'); }
   };
@@ -141,7 +157,27 @@ export default function App() {
           <div className="empty">
             <h2>Create your first universe</h2>
             <p className="muted">Upload your world document, add your characters, and let the AI populate it with users, posts and drama.</p>
-            <button className="primary" onClick={createWorld}>Create a world</button>
+            <div className="row" style={{ justifyContent: 'center' }}>
+              <button className="primary" onClick={createWorld}>Create a world</button>
+              <label className="button" style={{ margin: 0, color: 'var(--text)', fontSize: 14 }}>
+                Import a backup…
+                <input type="file" accept=".json" hidden onChange={async (e) => {
+                  const file = e.target.files[0];
+                  e.target.value = '';
+                  if (!file) return;
+                  const fd = new FormData();
+                  fd.append('file', file);
+                  try {
+                    const w = await api.post('/worlds/import', fd);
+                    await refreshWorlds();
+                    setWorldId(w.id);
+                    notify(`Imported "${w.name}"`);
+                  } catch (err) {
+                    notify(err.message, 'error');
+                  }
+                }} />
+              </label>
+            </div>
           </div>
         ) : (
           <>

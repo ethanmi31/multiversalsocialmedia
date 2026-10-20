@@ -13,7 +13,9 @@ npm run dev          # http://localhost:5173
 
 Open **Settings**, paste your OpenRouter API key, then pick a chat model and a cheap utility model. For production use, run `npm run build && npm start`.
 
-All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to change where it goes and `PORT` to change the port.
+All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to change where it goes and `PORT` to change the port. The app only accepts connections from your own computer, because it spends your OpenRouter credits. Set `HOST=0.0.0.0` if you deliberately want other devices on your network to reach it.
+
+**Backups:** under **World & Lore → Backup**, export a whole universe to one file, and import it again on any computer. Importing always creates a separate copy.
 
 ## How to use it
 
@@ -42,7 +44,7 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - Coming back after a while (30 minutes by default) runs a "while you were away" tick.
    - Replying to a post gets answers aimed at you.
    - Opening a thread sometimes has people already typing.
-   - **Hashtags and communities:** characters use #hashtags naturally, and **# Explore** shows trending tags and all communities. Click a tag to see every post with it.
+   - **Hashtags and communities:** characters use #hashtags naturally, and **# Explore** shows trending tags and all communities. Click a tag to see every post with it. Explore also has search (posts, names, @handles), and feeds have **Load older posts**.
      - Communities (e.g. "Snowdin", a group for one universe) form on their own as topics come up, or you can create one, or ask the Director.
      - Join one to get its tab on the feed, where you can post and **Let time pass here** so its members talk inside it.
      - Replies stay in their thread's community.
@@ -86,7 +88,7 @@ Your document is **never sent to the model in full** during normal use. It works
 | **Batching** | A world tick (posts, replies, DMs, follows, likes, drama updates) or a whole round of thread replies is one request with shared context. Engagement numbers grow by a free local simulation. |
 | **Cache-friendly prompts** | The stable parts of a prompt (world, character card) come first and stay identical between calls, so providers that support prompt caching bill them at a discount. |
 
-The **Usage** page shows tokens and cost per task as reported by OpenRouter, so you can see where credits go. The main dials are in **Settings → Token budgets**: lore budget, scan depth, recent messages kept and max reply length.
+Set a **daily spending limit** in Settings: once today's spending reaches it, all AI calls stop until the next day (background jobs and Live mode included). The **Usage** page shows today's spend against the limit, plus tokens and cost per task as reported by OpenRouter, so you can see where credits go. The main dials are in **Settings → Token budgets**: lore budget, scan depth, recent messages kept and max reply length.
 
 ## Project layout
 
@@ -99,6 +101,10 @@ server/
   engine.js      Character generation and import, world ticks, thread replies
   chat.js        DMs, real-life scenes, rolling summaries, continuity tracking
   worldstate.js  Storylines, relationships, memories, follows, likes, notifications
+  director.js    Out-of-character Director chat and its actions
+  canon.js       Characters and knowledge from the lorebook
+  communities.js Communities and hashtags
+  backup.js      Universe export/import
 client/src/
   App.jsx        Layout and navigation
   views/         Feed, Notifications, Chats (DMs + Real Life), Characters, Profile, WorldEditor, Settings, Usage

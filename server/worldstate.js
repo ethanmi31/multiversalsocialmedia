@@ -54,8 +54,9 @@ export function applyUpdates(worldId, u, source = 'feed') {
       if (!s?.title) continue;
       const involved = arr(s.involved).map(find).filter(Boolean).map((c) => c.id);
       const existing = db.prepare('SELECT * FROM storylines WHERE world_id = ? AND lower(title) = lower(?)').get(worldId, String(s.title));
-      const status = s.status === 'resolved' ? 'resolved' : 'active';
-      const heat = Math.max(0, Math.min(100, Number(s.heat) || 50));
+      // fields the model left out keep their current value
+      const status = s.status === 'resolved' || s.status === 'active' ? s.status : existing?.status || 'active';
+      const heat = s.heat != null && Number.isFinite(Number(s.heat)) ? Math.max(0, Math.min(100, Number(s.heat))) : existing?.heat ?? 50;
       const visibility = s.visibility === 'private' ? 'private' : 'public';
       if (existing) {
         const merged = [...new Set([...JSON.parse(existing.involved || '[]'), ...involved])];
@@ -74,10 +75,15 @@ export function applyUpdates(worldId, u, source = 'feed') {
     for (const r of arr(u.relationships)) {
       const a = find(r?.from), b = find(r?.to);
       if (!a || !b || a.id === b.id) continue;
+      // the AI never decides how the human's persona feels; only their lore or the Director can say
+      if (a.kind === 'player' && !['lore', 'director'].includes(source)) continue;
+      const old = db.prepare('SELECT * FROM relationships WHERE from_id = ? AND to_id = ?').get(a.id, b.id);
+      const status = r.status ? String(r.status).slice(0, 160) : old?.status || '';
+      const score = r.score != null && Number.isFinite(Number(r.score)) ? clampScore(r.score) : old?.score ?? 0;
       db.prepare(
         `INSERT INTO relationships (world_id, from_id, to_id, status, score) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(from_id, to_id) DO UPDATE SET status = excluded.status, score = excluded.score, updated_at = CURRENT_TIMESTAMP`
-      ).run(worldId, a.id, b.id, String(r.status || '').slice(0, 160), clampScore(r.score));
+      ).run(worldId, a.id, b.id, status, score);
     }
 
     for (const m of arr(u.memories)) {
@@ -129,6 +135,12 @@ export function like(worldId, post, liker) {
   const author = db.prepare('SELECT kind FROM characters WHERE id = ?').get(post.character_id);
   if (author?.kind === 'player' && liker.id !== post.character_id) notify(worldId, { type: 'like', personaId: post.character_id, actorId: liker.id, postId: post.id });
   return true;
+}
+
+export function unlike(post, liker) {
+  const r = db.prepare('DELETE FROM post_likes WHERE post_id = ? AND character_id = ?').run(post.id, liker.id);
+  if (r.changes) db.prepare('UPDATE posts SET likes = MAX(0, likes - 1) WHERE id = ?').run(post.id);
+  return !!r.changes;
 }
 
 export function notify(worldId, { type, personaId = null, actorId = null, postId = null, conversationId = null, text = '' }) {

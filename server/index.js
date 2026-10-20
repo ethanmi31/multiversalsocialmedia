@@ -11,10 +11,11 @@ import {
   splitCharactersFree, splitCharactersAI
 } from './engine.js';
 import { conversationMembers, pickResponder, streamReply, observeConversation, findOrCreateDm } from './chat.js';
-import { follow, like, followerCount } from './worldstate.js';
-import { listModels, httpError } from './openrouter.js';
+import { follow, like, unlike, followerCount } from './worldstate.js';
+import { listModels, httpError, spentToday } from './openrouter.js';
 import { directorChat, directorState } from './director.js';
 import { createCommunity, findCommunity, join as joinCommunity, leave as leaveCommunity, listCommunities, trendingHashtags } from './communities.js';
+import { exportUniverse, importUniverse } from './backup.js';
 import { startFromLoreJob, startLearnJob, getFromLoreJob, resetSkim } from './canon.js';
 
 const app = express();
@@ -52,7 +53,11 @@ api.put('/settings', (req, res) => {
   const patch = { ...req.body };
   if (!patch.apiKey) delete patch.apiKey; // empty field = keep existing key
   for (const k of Object.keys(patch)) {
-    if (typeof DEFAULT_SETTINGS[k] === 'number') patch[k] = Number(patch[k]);
+    if (typeof DEFAULT_SETTINGS[k] !== 'number') continue;
+    const n = Number(patch[k]);
+    // a blank or mistyped box must not break every request that uses the setting
+    if (patch[k] === '' || !Number.isFinite(n) || n < 0) delete patch[k];
+    else patch[k] = n;
   }
   saveSettings(patch);
   res.json({ ok: true });
@@ -64,7 +69,7 @@ api.get('/usage', (req, res) => {
     .prepare('SELECT task, COUNT(*) AS calls, SUM(prompt_tokens) AS prompt, SUM(completion_tokens) AS completion, SUM(cached_tokens) AS cached, SUM(cost) AS cost FROM usage_log GROUP BY task ORDER BY cost DESC')
     .all();
   const recent = db.prepare('SELECT * FROM usage_log ORDER BY id DESC LIMIT 50').all();
-  res.json({ totals, recent });
+  res.json({ totals, recent, today: spentToday(), dailyLimit: getSettings().dailySpendLimit });
 });
 api.delete('/usage', (req, res) => {
   db.prepare('DELETE FROM usage_log').run();
@@ -106,6 +111,20 @@ api.put('/worlds/:id', (req, res) => {
     if (f in req.body) db.prepare(`UPDATE worlds SET ${f} = ? WHERE id = ?`).run(String(req.body[f] ?? ''), id(req.params.id));
   }
   res.json({ ok: true });
+});
+/** Download a whole universe as one backup file. */
+api.get('/worlds/:id/export', (req, res) => {
+  const data = exportUniverse(id(req.params.id));
+  const file = `${data.world.name.replace(/[^\w -]+/g, '').trim() || 'universe'}.multiverse.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${file}"`);
+  res.json(data);
+});
+/** Restore a backup file as a new universe (never overwrites an existing one). */
+api.post('/worlds/import', upload.single('file'), (req, res) => {
+  if (!req.file) throw httpError(400, 'No file uploaded');
+  let data;
+  try { data = JSON.parse(req.file.buffer.toString('utf8')); } catch { throw httpError(400, "That file isn't valid JSON."); }
+  res.json(importUniverse(data));
 });
 api.delete('/worlds/:id', (req, res) => {
   db.prepare('DELETE FROM worlds WHERE id = ?').run(id(req.params.id));
@@ -320,7 +339,7 @@ api.delete('/characters/:id', (req, res) => {
 api.get('/characters/:id/profile', (req, res) => {
   const c = character(req.params.id);
   const viewer = req.query.as ? character(req.query.as, c.world_id) : null;
-  const posts = db.prepare(`${postSelect} WHERE p.character_id = ? ORDER BY p.id DESC LIMIT 40`).all(c.id);
+  const posts = db.prepare(`${postSelect} WHERE p.character_id = ? ORDER BY p.id DESC LIMIT 40`).all(viewer?.id ?? 0, c.id);
   const following = db.prepare('SELECT COUNT(*) AS n FROM follows WHERE follower_id = ?').get(c.id).n;
   const isFollowing = viewer ? !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(viewer.id, c.id) : false;
   const followsYou = viewer ? !!db.prepare('SELECT 1 FROM follows WHERE follower_id = ? AND followee_id = ?').get(c.id, viewer.id) : false;
@@ -336,9 +355,12 @@ api.post('/characters/:id/follow', (req, res) => {
 });
 
 // ---------------------------------------------------------------- feed
+// `likedByMe` needs the viewing persona's id as the first parameter of every query using this
 const postSelect = `SELECT p.*, c.name, c.handle, c.color, c.kind, k.slug AS communitySlug, k.name AS communityName,
-  (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replyCount
+  (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replyCount,
+  EXISTS (SELECT 1 FROM post_likes l WHERE l.post_id = p.id AND l.character_id = ?) AS likedByMe
   FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id`;
+const viewerId = (req) => Number(req.query.as) || 0;
 
 /** Home feed, one community's feed (?community=id), or everything with a hashtag (?tag=name, replies included). */
 api.get('/worlds/:id/posts', (req, res) => {
@@ -346,15 +368,22 @@ api.get('/worlds/:id/posts', (req, res) => {
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER;
   if (req.query.tag) {
     const tag = String(req.query.tag).replace(/^#/, '');
-    const rows = db.prepare(`${postSelect} WHERE p.world_id = ? AND p.id < ? AND p.content LIKE ? ORDER BY p.id DESC LIMIT 60`).all(wid, before, `%#${tag}%`);
+    const rows = db.prepare(`${postSelect} WHERE p.world_id = ? AND p.id < ? AND p.content LIKE ? ORDER BY p.id DESC LIMIT 60`).all(viewerId(req), wid, before, `%#${tag}%`);
     // LIKE is a rough cut; keep only real hashtag matches (not #tagged when looking for #tag)
     const re = new RegExp(`#${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i');
     return res.json(rows.filter((p) => re.test(p.content)).slice(0, 30));
   }
+  if (req.query.q) {
+    // search: words can appear in any order, in the post or the poster's name/handle (replies included)
+    const words = String(req.query.q).trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const where = words.map(() => '(p.content LIKE ? OR c.name LIKE ? OR c.handle LIKE ?)').join(' AND ');
+    const args = words.flatMap((w) => [`%${w}%`, `%${w}%`, `%${w.replace(/^@/, '')}%`]);
+    return res.json(db.prepare(`${postSelect} WHERE p.world_id = ? AND p.id < ? AND ${where} ORDER BY p.id DESC LIMIT 30`).all(viewerId(req), wid, before, ...args));
+  }
   const community = req.query.community ? findCommunity(wid, Number(req.query.community)) : null;
   if (req.query.community && !community) throw httpError(404, 'Community not found');
   res.json(db.prepare(`${postSelect} WHERE p.world_id = ? AND p.parent_id IS NULL AND p.id < ? AND (? IS NULL OR p.community_id = ?) ORDER BY p.id DESC LIMIT 30`)
-    .all(wid, before, community?.id ?? null, community?.id ?? null));
+    .all(viewerId(req), wid, before, community?.id ?? null, community?.id ?? null));
 });
 
 // ---------------------------------------------------------------- explore: hashtags and communities
@@ -387,9 +416,9 @@ api.delete('/communities/:id', (req, res) => {
   res.json({ ok: true });
 });
 api.get('/posts/:id', (req, res) => {
-  const p = db.prepare(`${postSelect} WHERE p.id = ?`).get(id(req.params.id));
+  const p = db.prepare(`${postSelect} WHERE p.id = ?`).get(viewerId(req), id(req.params.id));
   if (!p) throw httpError(404, 'Post not found');
-  const replies = db.prepare(`${postSelect} WHERE p.parent_id = ? ORDER BY p.id`).all(p.id);
+  const replies = db.prepare(`${postSelect} WHERE p.parent_id = ? ORDER BY p.id`).all(viewerId(req), p.id);
   res.json({ post: p, replies });
 });
 /** Opening a thread: should characters chime in right now? (random, with cooldown) */
@@ -415,9 +444,11 @@ api.post('/worlds/:id/posts', (req, res) => {
 });
 api.post('/posts/:id/like', (req, res) => {
   const p = post(req.params.id);
-  if (req.body.personaId) like(p.world_id, p, character(req.body.personaId, p.world_id));
-  else db.prepare('UPDATE posts SET likes = likes + 1 WHERE id = ?').run(p.id);
-  res.json({ ok: true });
+  if (!req.body.personaId) throw httpError(400, 'Pick a persona to like posts as.');
+  const me = character(req.body.personaId, p.world_id);
+  // liking again takes the like back
+  const liked = like(p.world_id, p, me) || !unlike(p, me);
+  res.json({ liked });
 });
 api.delete('/posts/:id', (req, res) => {
   db.prepare('DELETE FROM posts WHERE id = ?').run(id(req.params.id));
@@ -556,4 +587,5 @@ if (process.argv.includes('--dev')) {
   app.get('/{*splat}', (req, res) => res.sendFile(path.join(dist, 'index.html')));
 }
 
-app.listen(port, () => console.log(`Multiversal Social Media running at http://localhost:${port}`));
+const host = process.env.HOST || '127.0.0.1';
+app.listen(port, host, () => console.log(`Multiversal Social Media running at http://localhost:${port}${host === '127.0.0.1' ? '' : ` (listening on ${host})`}`));

@@ -24,9 +24,27 @@ export default function Feed(baseProps) {
   const caughtUp = useRef(false);
 
   const loadExplore = () => api.get(`/worlds/${worldId}/explore${persona ? `?as=${persona.id}` : ''}`).then((x) => { setExplore(x); return x; });
+  const [hasMore, setHasMore] = useState(false);
+  const feedQuery = (before) => {
+    const q = new URLSearchParams();
+    if (view.type === 'community') q.set('community', view.id);
+    if (view.type === 'tag') q.set('tag', view.tag);
+    if (view.type === 'search') q.set('q', view.q);
+    if (persona) q.set('as', persona.id);
+    if (before) q.set('before', before);
+    return `/worlds/${worldId}/posts?${q}`;
+  };
+  async function loadOlder() {
+    const older = await api.get(feedQuery(posts[posts.length - 1]?.id));
+    setPosts((cur) => [...cur, ...older.filter((p) => !cur.some((c) => c.id === p.id))]);
+    setHasMore(older.length >= 30);
+  }
   const load = async () => {
-    const q = view.type === 'community' ? `?community=${view.id}` : view.type === 'tag' ? `?tag=${encodeURIComponent(view.tag)}` : '';
-    if (view.type !== 'explore') setPosts(await api.get(`/worlds/${worldId}/posts${q}`).catch(() => { setView({ type: 'home' }); return []; }));
+    if (view.type !== 'explore') {
+      const list = await api.get(feedQuery()).catch(() => { setView({ type: 'home' }); return []; });
+      setPosts(list);
+      setHasMore(list.length >= 30);
+    }
     loadExplore();
     const st = await api.get(`/worlds/${worldId}/state`);
     setTrending(st.storylines.filter((s) => s.status === 'active' && s.visibility !== 'private').slice(0, 5));
@@ -34,13 +52,14 @@ export default function Feed(baseProps) {
   useEffect(() => {
     try { localStorage.setItem(`feedView:${worldId}`, JSON.stringify(view)); } catch {}
     load();
-  }, [worldId, view.type, view.id, view.tag, persona?.id]);
+  }, [worldId, view.type, view.id, view.tag, view.q, persona?.id]);
 
   const community = view.type === 'community' ? explore.communities.find((c) => c.id === view.id) : null;
   const joined = explore.communities.filter((c) => c.joined);
   const props = {
     ...baseProps,
     openTag: (tag) => { setThread(null); setView({ type: 'tag', tag }); },
+    search: (q) => q.trim() && setView({ type: 'search', q: q.trim() }),
     openCommunity: (cid) => { setThread(null); setView({ type: 'community', id: cid }); }
   };
 
@@ -98,7 +117,7 @@ export default function Feed(baseProps) {
 
   return (
     <div className="page feed-page">
-      <header className="page-head"><h1>{community ? community.name : view.type === 'tag' ? `#${view.tag}` : view.type === 'explore' ? 'Explore' : 'Feed'}</h1></header>
+      <header className="page-head"><h1>{community ? community.name : view.type === 'tag' ? `#${view.tag}` : view.type === 'search' ? `Search: ${view.q}` : view.type === 'explore' ? 'Explore' : 'Feed'}</h1></header>
 
       <nav className="feed-tabs">
         <button className={`chip ${view.type === 'home' ? 'active' : ''}`} onClick={() => setView({ type: 'home' })}>Home</button>
@@ -107,6 +126,7 @@ export default function Feed(baseProps) {
           <button key={c.id} className={`chip ${view.type === 'community' && view.id === c.id ? 'active' : ''}`} onClick={() => setView({ type: 'community', id: c.id })}>c/{c.slug}</button>
         ))}
         {view.type === 'tag' && <button className="chip active">#{view.tag}</button>}
+        {view.type === 'search' && <button className="chip active">🔍 {view.q}</button>}
         {community && !community.joined && <button className="chip active">c/{community.slug}</button>}
       </nav>
 
@@ -174,7 +194,8 @@ export default function Feed(baseProps) {
         {posts.map((p) => (
           <Post key={p.id} p={p} {...props} onOpen={() => setThread(p.id)} onChange={load} typing={typingOn.has(p.id)} />
         ))}
-        {!posts.length && <div className="empty small muted">{view.type === 'tag' ? `No posts with #${view.tag} yet.` : community ? 'Nothing posted here yet.' : 'The feed is quiet. Let some time pass or post something.'}</div>}
+        {hasMore && <AsyncButton className="load-more" notify={notify} onClick={loadOlder}>Load older posts</AsyncButton>}
+        {!posts.length && <div className="empty small muted">{view.type === 'tag' ? `No posts with #${view.tag} yet.` : view.type === 'search' ? `Nothing found for "${view.q}".` : community ? 'Nothing posted here yet.' : 'The feed is quiet. Let some time pass or post something.'}</div>}
       </div>
       </>}
 
@@ -201,9 +222,10 @@ export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, c
           {onOpen && <button className="link" onClick={onOpen}>💬 {p.replyCount || 0}</button>}
           {onReply && <button className="link" onClick={() => onReply(p)}>↩ reply</button>}
           <span className="stat">🔁 {fmtCount(p.reposts)}</span>
-          <button className="link" onClick={async () => {
-            try { await api.post(`/posts/${p.id}/like`, { personaId: persona?.id }); onChange?.(); } catch (e) { notify(e.message, 'error'); }
-          }}>♥ {fmtCount(p.likes)}</button>
+          <button onClick={async () => {
+            if (!persona) return notify('Create a persona to like posts.', 'error');
+            try { await api.post(`/posts/${p.id}/like`, { personaId: persona.id }); onChange?.(); } catch (e) { notify(e.message, 'error'); }
+          }} className={`link ${p.likedByMe ? 'liked' : ''}`} title={p.likedByMe ? 'Unlike' : 'Like'}>{p.likedByMe ? '♥' : '♡'} {fmtCount(p.likes)}</button>
           <button className="link" onClick={async () => { if (confirm('Delete post?')) { await api.del(`/posts/${p.id}`); onChange?.(); } }}>🗑</button>
         </div>
         {typing && <Typing label="People are replying" />}
@@ -218,7 +240,7 @@ function Thread(props) {
   const [text, setText] = useState('');
   const [typing, setTyping] = useState(false);
   const input = useRef();
-  const load = () => api.get(`/posts/${id}`).then(setData);
+  const load = () => api.get(`/posts/${id}${persona ? `?as=${persona.id}` : ''}`).then(setData);
 
   async function generate(body) {
     setTyping(true);
@@ -268,7 +290,8 @@ function Thread(props) {
   );
 }
 
-function Explore({ worldId, persona, notify, explore, reload, openTag, openCommunity }) {
+function Explore({ worldId, persona, notify, explore, reload, openTag, openCommunity, search }) {
+  const [q, setQ] = useState('');
   async function create() {
     const name = prompt('Community name (e.g. "Snowdin", "PRIME Powered Ones"):');
     if (!name?.trim()) return;
@@ -279,6 +302,13 @@ function Explore({ worldId, persona, notify, explore, reload, openTag, openCommu
   }
   return (
     <>
+      <section className="card">
+        <div className="row">
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search posts, people or @handles…" style={{ flex: 1 }}
+            onKeyDown={(e) => { if (e.key === 'Enter') search(q); }} />
+          <button onClick={() => search(q)} disabled={!q.trim()}>Search</button>
+        </div>
+      </section>
       <section className="card">
         <h2>Trending hashtags</h2>
         <div className="trending">

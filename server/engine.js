@@ -364,7 +364,7 @@ ${UPDATES_SCHEMA}}`;
       {
         role: 'system',
         content: `${worldPreamble(world)}
-You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = a post id from the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
+You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = the number from a [post N] label in the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
 ${dmsAllowed ? '"dms": optionally 0-2 private messages from NPCs to the human\'s personas, only when motivated (drama, relationships, something the human did, flirting, threats, gossip).' : ''}
 Use #hashtags naturally now and then (topics, events, fandoms, places) — not on every post. ${focus ? `This round happens INSIDE the community c/${focus.slug} ("${focus.name}"): most posts have "community":"${focus.slug}" and fit its topic.` : '"community": the slug if the post is made inside one of the existing communities (only by people who would be in it), else null.'}
 ${newCommunityAllowed ? '"newCommunity": optionally (only if a group would naturally form around a recurring topic, place, universe or fandom in what people are posting — e.g. people from one universe, a town, a fandom) one new community, founded by an NPC, with the NPCs who would join. Its first posts can be in this same response. Usually null.' : ''}
@@ -382,8 +382,8 @@ Return ONLY JSON: ${schema}`
           personaBlock(ps),
           newUserAllowed && npcRules(world),
           communities,
-          roots.length && `RECENT ${focus ? `POSTS IN c/${focus.slug}` : 'FEED'}:\n${roots.map((p) => `#${p.id} ${humanTag(p)}${p.community && !focus ? ` in c/${p.community}` : ''} [${p.likes} likes, ${p.replies} replies]: ${clip(p.content, 220)}`).join('\n')}`,
-          replies.length && `RECENT REPLIES:\n${replies.map((r) => `#${r.id} (on #${r.parent_id}) ${humanTag(r)}: ${clip(r.content, 160)}`).join('\n')}`,
+          roots.length && `RECENT ${focus ? `POSTS IN c/${focus.slug}` : 'FEED'}:\n${roots.map((p) => `[post ${p.id}] ${humanTag(p)}${p.community && !focus ? ` in c/${p.community}` : ''} (${p.likes} likes, ${p.replies} replies): ${clip(p.content, 220)}`).join('\n')}`,
+          replies.length && `RECENT REPLIES:\n${replies.map((r) => `[post ${r.id}] (reply on post ${r.parent_id}) ${humanTag(r)}: ${clip(r.content, 160)}`).join('\n')}`,
           `Write ${count} posts/replies now.${topic ? ` Current event/topic: ${topic}` : ''}`
         ])
       }
@@ -531,9 +531,9 @@ Return ONLY JSON: {"replies":[{"handle":string,"content":string}],"likes":[{"han
           state && `WORLD STATE (hidden from users):\n${state}`,
           `USERS WHO CAN REPLY:\n${responders.map((r) => characterCard(r, { brief: true })).join('\n\n')}`,
           personaBlock(humansHere),
-          `THREAD:\n${shown.map((t) => `#${t.id} ${humanTag(t)}: ${t.content}`).join('\n')}`,
+          `THREAD:\n${shown.map((t) => `[post ${t.id}] ${humanTag(t)}: ${t.content}`).join('\n')}`,
           human
-            ? `The human (@${human.handle}) just replied (#${human.id}). At least one reply must respond directly to them. Write ${count} replies.`
+            ? `The human (@${human.handle}) just replied (post ${human.id}). At least one reply must respond directly to them. Write ${count} replies.`
             : `Write ${count} new replies.`
         ])
       }
