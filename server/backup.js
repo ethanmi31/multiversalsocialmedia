@@ -1,4 +1,6 @@
-import { db, tx } from './db.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { db, tx, avatarDir } from './db.js';
 import { httpError } from './openrouter.js';
 
 // Export a whole universe to one JSON file, and import it back as a new universe.
@@ -17,7 +19,7 @@ const TABLES = [
   { name: 'characters', refs: {} },
   { name: 'lore_entries', refs: {} },
   { name: 'communities', refs: { creator_id: 'characters' }, optional: ['creator_id'] },
-  { name: 'posts', refs: { character_id: 'characters', parent_id: 'posts', community_id: 'communities' }, optional: ['community_id'] },
+  { name: 'posts', refs: { character_id: 'characters', parent_id: 'posts', community_id: 'communities', quote_id: 'posts' }, optional: ['community_id', 'quote_id'] },
   { name: 'post_likes', via: 'SELECT l.* FROM post_likes l JOIN posts p ON p.id = l.post_id WHERE p.world_id = ?', refs: { post_id: 'posts', character_id: 'characters' } },
   { name: 'community_members', via: 'SELECT m.* FROM community_members m JOIN communities c ON c.id = m.community_id WHERE c.world_id = ?', refs: { community_id: 'communities', character_id: 'characters' } },
   { name: 'follows', refs: { follower_id: 'characters', followee_id: 'characters' } },
@@ -39,7 +41,13 @@ export function exportUniverse(worldId) {
   for (const t of TABLES) {
     tables[t.name] = db.prepare(t.via || `SELECT * FROM ${t.name} WHERE world_id = ? ORDER BY ${t.name === 'relationships' || t.name === 'follows' ? 'rowid' : 'id'}`).all(worldId);
   }
-  return { format: FORMAT, version: VERSION, exportedAt: new Date().toISOString(), world, tables };
+  // profile pictures travel inside the file
+  const avatars = {};
+  for (const c of tables.characters) {
+    const file = c.avatar && path.join(avatarDir, path.basename(c.avatar));
+    if (file && fs.existsSync(file)) avatars[c.avatar] = fs.readFileSync(file).toString('base64');
+  }
+  return { format: FORMAT, version: VERSION, exportedAt: new Date().toISOString(), world, tables, avatars };
 }
 
 const columnsOf = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
@@ -84,11 +92,18 @@ export function importUniverse(data) {
       }
     }
 
-    // links that point "forward" in the order above
+    // links that point "forward" in the order above, and each character's own copy of their picture
     const loreIds = maps.lore_entries;
     for (const [oldId, newId] of maps.characters) {
       const c = data.tables.characters.find((x) => x.id === oldId);
       if (c?.lore_entry_id) db.prepare('UPDATE characters SET lore_entry_id = ? WHERE id = ?').run(loreIds.get(c.lore_entry_id) ?? null, newId);
+      const picture = c?.avatar && data.avatars?.[c.avatar];
+      let file = '';
+      if (picture) {
+        file = `${newId}-${Date.now()}${path.extname(c.avatar).replace(/[^.\w]/g, '') || '.png'}`;
+        fs.writeFileSync(path.join(avatarDir, file), Buffer.from(picture, 'base64'));
+      }
+      db.prepare('UPDATE characters SET avatar = ? WHERE id = ?').run(file, newId);
     }
     for (const v of data.tables.conversations || []) {
       const newId = maps.conversations.get(v.id);

@@ -235,17 +235,38 @@ function CharacterEditor({ worldId, initial, notify, onClose, onSaved }) {
   const set = (k) => (e) => setC({ ...c, [k]: e.target.value });
   const isNew = !c.id;
 
+  const [picture, setPicture] = useState(null); // file chosen before a new character exists
   async function save() {
     if (!c.name.trim()) return notify('Name is required', 'error');
-    if (isNew) await api.post(`/worlds/${worldId}/characters`, c);
-    else await api.put(`/characters/${c.id}`, c);
+    const saved = isNew ? await api.post(`/worlds/${worldId}/characters`, c) : await api.put(`/characters/${c.id}`, c);
+    if (picture) await uploadAvatar(saved.id, picture);
     onSaved();
+  }
+  async function uploadAvatar(cid, file) {
+    const fd = new FormData();
+    fd.append('file', file);
+    return api.post(`/characters/${cid}/avatar`, fd);
   }
 
   return (
     <div className="modal-bg" onClick={onClose}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <h2>{isNew ? 'New character' : `Edit ${initial.name}`}</h2>
+        <div className="row" style={{ marginBottom: 12 }}>
+          <Avatar c={{ ...c, avatar: picture ? null : c.avatar }} size={56} />
+          {picture && <span className="small muted">{picture.name} (saved with the character)</span>}
+          <label className="button" style={{ margin: 0, color: 'var(--text)', fontSize: 14 }}>
+            {c.avatar || picture ? 'Change picture' : 'Add picture'}
+            <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden onChange={async (e) => {
+              const file = e.target.files[0];
+              e.target.value = '';
+              if (!file) return;
+              if (isNew) return setPicture(file);
+              try { const r = await uploadAvatar(c.id, file); setC({ ...c, avatar: r.avatar }); } catch (err) { notify(err.message, 'error'); }
+            }} />
+          </label>
+          {c.avatar && !isNew && <button className="link" onClick={async () => { await api.del(`/characters/${c.id}/avatar`); setC({ ...c, avatar: '' }); }}>Remove</button>}
+        </div>
         <div className="grid2">
           <label>Display name (username)<input value={c.name} onChange={set('name')} autoFocus placeholder="What shows on their profile" /></label>
           <label>@handle<input value={c.handle} onChange={set('handle')} placeholder="auto from display name" /></label>

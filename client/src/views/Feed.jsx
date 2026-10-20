@@ -204,8 +204,12 @@ export default function Feed(baseProps) {
   );
 }
 
-export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, chars, openProfile, openTag, openCommunity, notify }) {
+export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, chars, openProfile, openTag, openCommunity, notify, worldId }) {
+  const [editing, setEditing] = useState(null);
+  const [quoting, setQuoting] = useState(false);
+  const mine = p.kind === 'player';
   return (
+    <>
     <article className={`post ${compact ? 'compact' : ''}`} onClick={onOpen} style={{ cursor: onOpen ? 'pointer' : 'default' }}>
       <div onClick={(e) => { e.stopPropagation(); openProfile(p.character_id); }} style={{ cursor: 'pointer' }}><Avatar c={p} /></div>
       <div className="post-body">
@@ -217,7 +221,24 @@ export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, c
         {p.communitySlug && !compact && openCommunity && (
           <a className="community-chip" onClick={(e) => { e.stopPropagation(); openCommunity(p.community_id); }}>c/{p.communitySlug}</a>
         )}
-        <div className="post-text"><RichText text={p.content} chars={chars} openProfile={openProfile} openTag={openTag} /></div>
+        {editing != null ? (
+          <div className="row" onClick={(e) => e.stopPropagation()} style={{ margin: '4px 0' }}>
+            <textarea rows={2} value={editing} onChange={(e) => setEditing(e.target.value)} autoFocus />
+            <div className="stack-col">
+              <AsyncButton className="primary" notify={notify} onClick={async () => { await api.put(`/posts/${p.id}`, { content: editing }); setEditing(null); onChange?.(); }}>Save</AsyncButton>
+              <button onClick={() => setEditing(null)}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="post-text"><RichText text={p.content} chars={chars} openProfile={openProfile} openTag={openTag} />{p.edited ? <span className="muted small"> (edited)</span> : null}</div>
+        )}
+        {p.quoteContent != null && (
+          <div className="quote-card" onClick={(e) => { e.stopPropagation(); openProfile(p.quoteCharacterId); }}>
+            <div className="row small"><Avatar c={{ name: p.quoteName, color: p.quoteColor, avatar: p.quoteAvatar }} size={18} /><b>{p.quoteName}</b><span className="muted">@{p.quoteHandle}</span></div>
+            <div className="small"><RichText text={p.quoteContent} chars={chars} openProfile={openProfile} openTag={openTag} /></div>
+          </div>
+        )}
+        {p.quote_id && p.quoteContent == null && <div className="quote-card muted small">This post was deleted.</div>}
         <div className="post-actions muted small" onClick={(e) => e.stopPropagation()}>
           {onOpen && <button className="link" onClick={onOpen}>💬 {p.replyCount || 0}</button>}
           {onReply && <button className="link" onClick={() => onReply(p)}>↩ reply</button>}
@@ -226,11 +247,38 @@ export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, c
             if (!persona) return notify('Create a persona to like posts.', 'error');
             try { await api.post(`/posts/${p.id}/like`, { personaId: persona.id }); onChange?.(); } catch (e) { notify(e.message, 'error'); }
           }} className={`link ${p.likedByMe ? 'liked' : ''}`} title={p.likedByMe ? 'Unlike' : 'Like'}>{p.likedByMe ? '♥' : '♡'} {fmtCount(p.likes)}</button>
+          {!compact && persona && <button className="link" title="Quote this post" onClick={() => setQuoting(true)}>❝ quote</button>}
+          {mine && <button className="link" title="Edit" onClick={() => setEditing(p.content)}>✎</button>}
           <button className="link" onClick={async () => { if (confirm('Delete post?')) { await api.del(`/posts/${p.id}`); onChange?.(); } }}>🗑</button>
         </div>
         {typing && <Typing label="People are replying" />}
       </div>
     </article>
+    {quoting && <QuoteComposer p={p} persona={persona} worldId={worldId} notify={notify} onClose={() => setQuoting(false)} onPosted={() => { setQuoting(false); onChange?.(); }} />}
+    </>
+  );
+}
+
+function QuoteComposer({ p, persona, worldId, notify, onClose, onPosted }) {
+  const [text, setText] = useState('');
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h2>Quote post</h2>
+        <div className="row"><Avatar c={persona} size={30} /><b>{persona.name}</b></div>
+        <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="Add your take…" autoFocus style={{ margin: '10px 0' }} />
+        <div className="quote-card small"><b>{p.name}</b> <span className="muted">@{p.handle}</span><div>{p.content}</div></div>
+        <div className="row space" style={{ marginTop: 12 }}>
+          <button onClick={onClose}>Cancel</button>
+          <AsyncButton className="primary" notify={notify} disabled={!text.trim()} onClick={async () => {
+            const { id } = await api.post(`/worlds/${worldId}/posts`, { characterId: persona.id, content: text, quoteId: p.id });
+            onPosted();
+            // people react to a quote like any post
+            api.post(`/posts/${id}/replies/generate`, {}).then(onPosted).catch(() => {});
+          }}>Post</AsyncButton>
+        </div>
+      </div>
+    </div>
   );
 }
 

@@ -269,7 +269,7 @@ function findLoose(haystack, needle = '') {
 function recentFeed(worldId, communityId = null) {
   const roots = db
     .prepare(
-      `SELECT p.id, p.content, p.likes, c.handle, c.kind, k.slug AS community, (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replies
+      `SELECT p.id, p.content, p.likes, p.quote_id, c.handle, c.kind, k.slug AS community, (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replies
        FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id
        WHERE p.world_id = ? AND p.parent_id IS NULL AND (? IS NULL OR p.community_id = ?) ORDER BY p.id DESC LIMIT 14`
     )
@@ -350,7 +350,7 @@ export async function worldTick(worldId, { count = 5, topic = '', allowDm, commu
   const state = worldContext(worldId, { focus: actors, others: ps, memoriesPer: 3 });
   const lore = activateLore(worldId, [topic, state, ...actors.flatMap(knownNames), ...roots.slice(-6).map((p) => p.content)].join('\n'));
 
-  const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null,"community":slug|null}],
+  const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null,"quote":number|null,"community":slug|null}],
 ${newCommunityAllowed ? '"newCommunity":{"name":string,"description":string,"creator":handle,"members":[handles]}|null,\n' : ''}
 ${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n' : ''}${newUserAllowed ? '"newUsers":[{"name":string,"handle":string,"realName":string,"bio":string,"description":string,"followers":number}],\n' : ''}"follows":[{"from":handle,"to":handle}],"unfollows":[{"from":handle,"to":handle}],
 "likes":[{"handle":string,"postId":number}],
@@ -366,6 +366,7 @@ ${UPDATES_SCHEMA}}`;
         content: `${worldPreamble(world)}
 You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = the number from a [post N] label in the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
 ${dmsAllowed ? '"dms": optionally 0-2 private messages from NPCs to the human\'s personas, only when motivated (drama, relationships, something the human did, flirting, threats, gossip).' : ''}
+"quote": a [post N] number to quote-post it with your own comment (dunking, sharing, receipts) — use sometimes, never together with replyTo.
 Use #hashtags naturally now and then (topics, events, fandoms, places) — not on every post. ${focus ? `This round happens INSIDE the community c/${focus.slug} ("${focus.name}"): most posts have "community":"${focus.slug}" and fit its topic.` : '"community": the slug if the post is made inside one of the existing communities (only by people who would be in it), else null.'}
 ${newCommunityAllowed ? '"newCommunity": optionally (only if a group would naturally form around a recurring topic, place, universe or fandom in what people are posting — e.g. people from one universe, a town, a fandom) one new community, founded by an NPC, with the NPCs who would join. Its first posts can be in this same response. Usually null.' : ''}
 ${newUserAllowed ? `"newUsers": optionally 0-1 brand-new account joining the platform because of current events (a new user may also post in this same response using their handle).\n${ACCOUNT_FIELDS}` : ''}
@@ -382,7 +383,7 @@ Return ONLY JSON: ${schema}`
           personaBlock(ps),
           newUserAllowed && npcRules(world),
           communities,
-          roots.length && `RECENT ${focus ? `POSTS IN c/${focus.slug}` : 'FEED'}:\n${roots.map((p) => `[post ${p.id}] ${humanTag(p)}${p.community && !focus ? ` in c/${p.community}` : ''} (${p.likes} likes, ${p.replies} replies): ${clip(p.content, 220)}`).join('\n')}`,
+          roots.length && `RECENT ${focus ? `POSTS IN c/${focus.slug}` : 'FEED'}:\n${roots.map((p) => `[post ${p.id}] ${humanTag(p)}${p.community && !focus ? ` in c/${p.community}` : ''} (${p.likes} likes, ${p.replies} replies)${p.quote_id ? ` quoting post ${p.quote_id}` : ''}: ${clip(p.content, 220)}`).join('\n')}`,
           replies.length && `RECENT REPLIES:\n${replies.map((r) => `[post ${r.id}] (reply on post ${r.parent_id}) ${humanTag(r)}: ${clip(r.content, 160)}`).join('\n')}`,
           `Write ${count} posts/replies now.${topic ? ` Current event/topic: ${topic}` : ''}`
         ])
@@ -411,7 +412,7 @@ Return ONLY JSON: ${schema}`
     founded = createCommunity(worldId, { name: nc.name, description: nc.description, creatorId: find(nc.creator).id, memberIds: members });
     announceCommunity(worldId, founded);
   }
-  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes, community_id) VALUES (?, ?, ?, ?, ?, ?)');
+  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes, community_id, quote_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
   const created = [];
   for (const p of arr(out.posts).slice(0, count)) {
     const author = find(p?.handle);
@@ -422,7 +423,8 @@ Return ONLY JSON: ${schema}`
       ? db.prepare('SELECT community_id FROM posts WHERE id = ?').get(parent).community_id
       : (p.community ? findCommunity(worldId, p.community)?.id : null) ?? focus?.id ?? null;
     if (where) joinCommunity(where, author.id);
-    const id = Number(ins.run(worldId, author.id, parent, String(p.content).trim(), parent ? 0 : Math.floor(Math.random() * 20), where).lastInsertRowid);
+    const quoted = !parent && p.quote != null ? db.prepare('SELECT id FROM posts WHERE id = ? AND world_id = ?').get(Number(p.quote), worldId)?.id ?? null : null;
+    const id = Number(ins.run(worldId, author.id, parent, String(p.content).trim(), parent ? 0 : Math.floor(Math.random() * 20), where, quoted).lastInsertRowid);
     notifyForPost(worldId, id);
     created.push(id);
   }

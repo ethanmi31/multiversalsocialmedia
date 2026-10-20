@@ -54,8 +54,11 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - A narrator plays every character present, and never acts for you.
    - What happens is remembered and can show up on the feed as venting, subtweets or leaks.
    - **Let it spread** pushes it into the world immediately. **Meet IRL** in a DM takes that conversation offline.
+- **Posts:** quote any post with your own comment (characters quote too), edit your own posts, and give any character a **profile picture** in their editor. Pictures are stored in `data/avatars` and included in backups.
 9. **Director:** an out-of-character chat with the engine for the current universe. Tell it what to fix or stop doing ("wrap up that storyline", "Lira went home, stop putting her at the gas station").
    - It changes the world state directly: storylines, memories, relationships, who's on the platform.
+   - It can make things happen: a character posts or replies, someone DMs you, or an event plays out right now.
+   - It can create and edit characters (display name, handle, bio, description, knowledge), re-learn from the lore, set follows, delete posts, manage communities, and edit or add to the universe's world rules, summary and random-user instructions.
    - Lasting corrections become **notes**, standing rules added to every prompt in that universe. You can edit them or switch them off in the side panel.
    - It only reads and changes its own universe.
 10. **Profiles:** click any name to see posts, followers, follow/unfollow, Message, Meet IRL, and what that character remembers (editable).

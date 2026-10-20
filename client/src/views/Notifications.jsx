@@ -7,10 +7,11 @@ const VERB = {
   mention: 'mentioned you',
   follow: 'followed you',
   like: 'liked your post',
+  quote: 'quoted your post',
   dm: 'sent you a message',
   event: ''
 };
-const ICON = { reply: '💬', mention: '@', follow: '➕', like: '♥', dm: '✉', event: '🔥' };
+const ICON = { reply: '💬', mention: '@', follow: '➕', like: '♥', dm: '✉', event: '🔥', quote: '❝' };
 
 export default function Notifications({ worldId, refreshWorlds, openProfile, openConversation, personas }) {
   const [items, setItems] = useState([]);
@@ -31,7 +32,7 @@ export default function Notifications({ worldId, refreshWorlds, openProfile, ope
           <div key={n.id} className={`notif ${n.read ? '' : 'unread'}`}
             onClick={() => (n.type === 'dm' && n.conversation_id ? openConversation(n.conversation_id) : n.actor_id && openProfile(n.actor_id))}>
             <span className="notif-icon">{ICON[n.type]}</span>
-            {n.actor_id && <Avatar c={{ name: n.actorName, color: n.actorColor }} size={30} />}
+            {n.actor_id && <Avatar c={{ name: n.actorName, color: n.actorColor, avatar: n.actorAvatar }} size={30} />}
             <div className="notif-body">
               <div>
                 {n.actor_id && <b>{n.actorName}</b>} {n.text && !n.actor_id ? n.text : VERB[n.type]}

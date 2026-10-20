@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
-import { db, getSettings, saveSettings, estimateTokens, DEFAULT_SETTINGS } from './db.js';
+import { db, getSettings, saveSettings, estimateTokens, DEFAULT_SETTINGS, avatarDir } from './db.js';
 import {
   extractText, parseSillyTavernLorebook, readPngCard, importEntries, insertEntries, startCompile, getJob, estimateCompile, summarizeWorld, activateLore
 } from './lorebook.js';
@@ -332,9 +332,34 @@ api.put('/characters/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM characters WHERE id = ?').get(c.id));
 });
 api.delete('/characters/:id', (req, res) => {
+  const c = db.prepare('SELECT * FROM characters WHERE id = ?').get(id(req.params.id));
+  if (c) removeAvatar(c);
   db.prepare('DELETE FROM characters WHERE id = ?').run(id(req.params.id));
   res.json({ ok: true });
 });
+
+/** Profile picture upload (png/jpg/gif/webp, up to 4 MB). */
+const AVATAR_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
+api.post('/characters/:id/avatar', upload.single('file'), (req, res) => {
+  const c = character(req.params.id);
+  const ext = AVATAR_TYPES[req.file?.mimetype];
+  if (!ext) throw httpError(400, 'Pick a PNG, JPG, GIF or WebP image.');
+  if (req.file.size > 4 * 1024 * 1024) throw httpError(400, 'That image is over 4 MB.');
+  const file = `${c.id}-${Date.now()}.${ext}`;
+  fs.writeFileSync(path.join(avatarDir, file), req.file.buffer);
+  removeAvatar(c);
+  db.prepare('UPDATE characters SET avatar = ? WHERE id = ?').run(file, c.id);
+  res.json({ avatar: file });
+});
+api.delete('/characters/:id/avatar', (req, res) => {
+  const c = character(req.params.id);
+  removeAvatar(c);
+  db.prepare("UPDATE characters SET avatar = '' WHERE id = ?").run(c.id);
+  res.json({ ok: true });
+});
+function removeAvatar(c) {
+  if (c.avatar) fs.rmSync(path.join(avatarDir, path.basename(c.avatar)), { force: true });
+}
 
 api.get('/characters/:id/profile', (req, res) => {
   const c = character(req.params.id);
@@ -356,10 +381,12 @@ api.post('/characters/:id/follow', (req, res) => {
 
 // ---------------------------------------------------------------- feed
 // `likedByMe` needs the viewing persona's id as the first parameter of every query using this
-const postSelect = `SELECT p.*, c.name, c.handle, c.color, c.kind, k.slug AS communitySlug, k.name AS communityName,
+const postSelect = `SELECT p.*, c.name, c.handle, c.color, c.kind, c.avatar, k.slug AS communitySlug, k.name AS communityName,
+  q.content AS quoteContent, qc.name AS quoteName, qc.handle AS quoteHandle, qc.color AS quoteColor, qc.avatar AS quoteAvatar, q.character_id AS quoteCharacterId,
   (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replyCount,
   EXISTS (SELECT 1 FROM post_likes l WHERE l.post_id = p.id AND l.character_id = ?) AS likedByMe
-  FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id`;
+  FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id
+  LEFT JOIN posts q ON q.id = p.quote_id LEFT JOIN characters qc ON qc.id = q.character_id`;
 const viewerId = (req) => Number(req.query.as) || 0;
 
 /** Home feed, one community's feed (?community=id), or everything with a hashtag (?tag=name, replies included). */
@@ -439,7 +466,9 @@ api.post('/worlds/:id/posts', (req, res) => {
     communityId = k.id;
   }
   if (communityId) joinCommunity(communityId, Number(characterId));
-  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, community_id) VALUES (?, ?, ?, ?, ?)').run(wid, characterId, rootId, content.trim(), communityId);
+  const quote = req.body.quoteId ? post(req.body.quoteId, wid) : null;
+  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, community_id, quote_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(wid, characterId, rootId, content.trim(), communityId, quote?.id ?? null);
   res.json({ id: Number(r.lastInsertRowid) });
 });
 api.post('/posts/:id/like', (req, res) => {
@@ -449,6 +478,13 @@ api.post('/posts/:id/like', (req, res) => {
   // liking again takes the like back
   const liked = like(p.world_id, p, me) || !unlike(p, me);
   res.json({ liked });
+});
+/** Edit a post's text (shown as "edited"). */
+api.put('/posts/:id', (req, res) => {
+  const p = post(req.params.id);
+  if (!String(req.body.content || '').trim()) throw httpError(400, 'A post needs some text.');
+  db.prepare('UPDATE posts SET content = ?, edited = 1 WHERE id = ?').run(String(req.body.content).trim(), p.id);
+  res.json({ ok: true });
 });
 api.delete('/posts/:id', (req, res) => {
   db.prepare('DELETE FROM posts WHERE id = ?').run(id(req.params.id));
@@ -461,7 +497,7 @@ api.post('/posts/:id/replies/generate', async (req, res) => res.json({ created: 
 api.get('/worlds/:id/notifications', (req, res) => {
   res.json(
     db.prepare(
-      `SELECT n.*, a.name AS actorName, a.handle AS actorHandle, a.color AS actorColor, p.content AS postContent, pe.handle AS personaHandle
+      `SELECT n.*, a.name AS actorName, a.handle AS actorHandle, a.color AS actorColor, a.avatar AS actorAvatar, p.content AS postContent, pe.handle AS personaHandle
        FROM notifications n LEFT JOIN characters a ON a.id = n.actor_id LEFT JOIN posts p ON p.id = n.post_id LEFT JOIN characters pe ON pe.id = n.persona_id
        WHERE n.world_id = ? ORDER BY n.id DESC LIMIT 100`
     ).all(id(req.params.id))
@@ -503,7 +539,7 @@ api.get('/conversations/:id', (req, res) => {
   const conv = conversation(req.params.id);
   db.prepare('UPDATE conversations SET unread = 0 WHERE id = ?').run(conv.id);
   const messages = db
-    .prepare('SELECT m.*, c.name, c.handle, c.color FROM messages m LEFT JOIN characters c ON c.id = m.character_id WHERE m.conversation_id = ? ORDER BY m.id')
+    .prepare('SELECT m.*, c.name, c.handle, c.color, c.avatar FROM messages m LEFT JOIN characters c ON c.id = m.character_id WHERE m.conversation_id = ? ORDER BY m.id')
     .all(conv.id);
   res.json({ ...conv, members: conversationMembers(conv.id), messages });
 });
@@ -564,6 +600,7 @@ api.post('/conversations/:id/reply', async (req, res) => {
   res.end();
 });
 
+app.use('/avatars', express.static(avatarDir, { maxAge: '30d', immutable: true }));
 app.use('/api', api);
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {

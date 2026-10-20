@@ -5,7 +5,10 @@ import { AsyncButton, Typing, timeAgo } from '../components.jsx';
 const EXAMPLES = [
   'Lira went back home to her own universe already, stop putting her at the gas station.',
   'Wrap up the hammer storyline, it has gone on way too long.',
-  'Stop making everyone talk about me in every post.',
+  'Make a huge argument break out about the leaked group chat.',
+  'Have Tolan DM me asking where his hammer is.',
+  'Change Masters\' bio to "drunk but reliable" and add that he hates mornings to his description.',
+  'Add a rule that nobody in the PRIME universe knows about the Author.',
   'Why does everyone know about my fight with Tolan?'
 ];
 
@@ -41,7 +44,7 @@ export default function Director({ worldId, world, notify }) {
         <header className="conv-head">
           <div style={{ flex: 1 }}>
             <b>Director</b>
-            <div className="muted small">Out of character. Tell the engine what to change or stop doing in <b>{world?.name}</b> — only this universe is affected.</div>
+            <div className="muted small">Out of character. Tell the engine what to change, fix or make happen in <b>{world?.name}</b> — only this universe is affected.</div>
           </div>
           {state.messages.length > 0 && (
             <button className="link small" onClick={async () => { if (confirm('Clear the director chat? Notes stay.')) setState(await api.del(`/worlds/${worldId}/director/messages`)); }}>Clear chat</button>

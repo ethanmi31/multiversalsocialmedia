@@ -2,8 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const dataDir = process.env.DATA_DIR || path.resolve('data');
-fs.mkdirSync(dataDir, { recursive: true });
+export const dataDir = process.env.DATA_DIR || path.resolve('data');
+export const avatarDir = path.join(dataDir, 'avatars');
+fs.mkdirSync(avatarDir, { recursive: true });
 
 export const db = new DatabaseSync(path.join(dataDir, 'multiverse.db'));
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -219,6 +220,9 @@ addColumn('storylines', 'visibility', "TEXT DEFAULT 'public'"); // private = onl
 addColumn('characters', 'real_name', "TEXT DEFAULT ''");
 addColumn('characters', 'lore_entry_id', 'INTEGER');
 addColumn('characters', 'knowledge', "TEXT DEFAULT ''");
+addColumn('characters', 'avatar', "TEXT DEFAULT ''");                // profile picture file in data/avatars
+addColumn('posts', 'quote_id', 'INTEGER REFERENCES posts(id) ON DELETE SET NULL'); // quote post: the post being quoted
+addColumn('posts', 'edited', 'INTEGER DEFAULT 0');
 addColumn('posts', 'community_id', 'INTEGER REFERENCES communities(id) ON DELETE CASCADE'); // posted inside a community (replies inherit the thread's)             // what they know from the lore: their universe, people, events (always included)          // the lorebook entry this character was created from
 addColumn('lore_entries', 'is_character', 'INTEGER');         // NULL = not skimmed yet, 1 = describes a character, 0 = doesn't
 addColumn('lore_entries', 'character_name', "TEXT DEFAULT ''"); // who they really are; `name` is the display name on their profile

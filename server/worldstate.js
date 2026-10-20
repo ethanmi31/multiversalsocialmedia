@@ -148,11 +148,18 @@ export function notify(worldId, { type, personaId = null, actorId = null, postId
     .run(worldId, personaId, type, actorId, postId, conversationId, text);
 }
 
-/** After an AI post/reply is created: notify personas who were replied to or @mentioned. */
+/** After an AI post/reply is created: notify personas who were replied to, quoted or @mentioned. */
 export function notifyForPost(worldId, postId) {
   const p = db.prepare('SELECT * FROM posts WHERE id = ?').get(postId);
   if (!p) return;
   const notified = new Set([p.character_id]);
+  if (p.quote_id) {
+    const q = db.prepare('SELECT p.character_id, c.kind FROM posts p JOIN characters c ON c.id = p.character_id WHERE p.id = ?').get(p.quote_id);
+    if (q?.kind === 'player' && !notified.has(q.character_id)) {
+      notify(worldId, { type: 'quote', personaId: q.character_id, actorId: p.character_id, postId: p.id });
+      notified.add(q.character_id);
+    }
+  }
   if (p.parent_id) {
     const root = db.prepare('SELECT p.character_id, c.kind FROM posts p JOIN characters c ON c.id = p.character_id WHERE p.id = ?').get(p.parent_id);
     if (root?.kind === 'player' && !notified.has(root.character_id)) {

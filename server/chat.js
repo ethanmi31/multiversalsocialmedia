@@ -220,7 +220,7 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
   }
   const { messages, lore } = built;
   onMeta?.({
-    speaker: speaker ? { id: speaker.id, name: speaker.name, handle: speaker.handle, color: speaker.color } : null,
+    speaker: speaker ? { id: speaker.id, name: speaker.name, handle: speaker.handle, color: speaker.color, avatar: speaker.avatar } : null,
     lore: lore.entries.map((e) => e.title),
     promptTokens: estimateTokens(messages.map((m) => m.content).join('\n'))
   });

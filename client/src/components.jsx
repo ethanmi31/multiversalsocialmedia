@@ -2,7 +2,10 @@ import { useState } from 'react';
 
 export function Avatar({ c, size = 40 }) {
   const name = c?.name || '?';
-  const initials = name.split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+  if (c?.avatar) {
+    return <img className="avatar" src={`/avatars/${c.avatar}`} alt={name} style={{ width: size, height: size, objectFit: 'cover' }} />;
+  }
+  const initials = name.split(/\s+/).map((w) => [...w][0]).slice(0, 2).join('').toUpperCase();
   return (
     <div className="avatar" style={{ width: size, height: size, background: c?.color || '#888', fontSize: size * 0.4 }}>
       {initials}

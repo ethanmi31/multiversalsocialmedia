@@ -272,3 +272,9 @@ select.add-person { width: auto; padding: 3px 8px; font-size: 12.5px; }
 button.trend { border: none; }
 .post-actions .liked { color: #e0567a; }
 .load-more { display: block; margin: 14px auto; }
+
+/* --- quotes, editing, pictures --- */
+.quote-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin: 4px 0 6px; background: var(--panel); cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+.quote-card:hover { border-color: var(--accent); }
+.stack-col { display: flex; flex-direction: column; gap: 4px; }
+img.avatar { display: block; }
