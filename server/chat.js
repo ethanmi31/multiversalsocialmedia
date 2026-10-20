@@ -102,7 +102,8 @@ function toMessages(stable, dynamic, hist, isAssistant, label) {
     const role = isAssistant(m) ? 'assistant' : 'user';
     const content = role === 'assistant' ? m.content : label(m);
     const prev = messages[messages.length - 1];
-    if (prev.role === role && role === 'user') prev.content += `\n${content}`;
+    // a reply sent as several texts goes back to the model as the one turn it wrote
+    if (prev.role === role && role !== 'system') prev.content += role === 'assistant' ? `\n\n${content}` : `\n${content}`;
     else messages.push({ role, content });
   }
   return messages;
@@ -134,7 +135,10 @@ Have a real conversation:
     memoryBlock(conv.world_id, speaker, player, others),
     conv.summary && `EARLIER IN THIS CONVERSATION:\n${conv.summary}`
   ]);
-  const messages = toMessages(stable, dynamic, hist, (m) => m.character_id === speaker.id, (m) => `${speakerName(m)}: ${m.content}`);
+  // In a 1:1 DM the other side is always the same person, so no name labels: labelled lines read like a
+  // script, and models then "continue the script" by first re-writing the human's line as their own.
+  const label = others.length ? (m) => `${speakerName(m)}: ${m.content}` : (m) => m.content;
+  const messages = toMessages(stable, dynamic, hist, (m) => m.character_id === speaker.id, label);
   if (messages[messages.length - 1].role !== 'user') messages.push({ role: 'user', content: `(Continue the conversation as ${speaker.name}.)` });
   return { messages, lore };
 }
@@ -221,7 +225,8 @@ export async function streamReply(convId, { characterId, onToken, onMeta, signal
   const { text: raw, finish } = await stream({ task: scene ? 'scene' : 'chat', messages, onToken, signal, maxTokens: scene ? s.sceneMaxTokens : s.maxReplyTokens });
   const truncated = finish === 'length';
   const members = conversationMembers(convId);
-  let text = scene ? cleanScene(raw, conv) : cleanReply(raw, members, conv.player_id);
+  const lastHuman = db.prepare('SELECT content FROM messages WHERE conversation_id = ? AND is_player = 1 ORDER BY id DESC LIMIT 1').get(convId)?.content;
+  let text = scene ? cleanScene(raw, conv) : cleanReply(raw, speaker, members, conv.player_id, lastHuman);
   if (truncated) text = toLastSentence(text);
   if (!text) throw httpError(502, 'The reply was empty after removing lines written for other people. Try regenerating.');
   const ins = db.prepare('INSERT INTO messages (conversation_id, character_id, is_player, content) VALUES (?, ?, 0, ?)');
@@ -239,14 +244,36 @@ function toLastSentence(text) {
   return m && m[0].length > text.length * 0.5 ? m[0].trim() : text.trim();
 }
 
-/** Strips a leading "Name:" and cuts the reply where the model starts writing lines for someone else. */
-function cleanReply(text, members, playerId) {
+/**
+ * Keeps only the speaker's own words: removes lines the model wrote as someone else (including an echo of
+ * the human's last message), strips the speaker's own "Name:" label, and cuts where it starts writing for others.
+ */
+function cleanReply(text, speaker, members, playerId, lastHumanText = '') {
   const player = playerId ? db.prepare('SELECT name FROM characters WHERE id = ?').get(playerId) : null;
-  const names = [...new Set([...members.flatMap(knownNames), player?.name, 'User', 'You'].filter(Boolean))];
-  const alt = names.map(escapeRe).join('|');
-  let out = text.replace(new RegExp(`^\\s*\\**(?:${alt})\\**\\s*:\\s*`, 'i'), '');
-  const cut = out.search(new RegExp(`\\n\\s*\\**(?:${alt})\\**\\s*:`, 'i'));
-  if (cut > 0) out = out.slice(0, cut);
+  const mine = knownNames(speaker);
+  const theirs = [...new Set([...members.filter((m) => m.id !== speaker.id).flatMap(knownNames), player?.name, 'User', 'You'].filter(Boolean))]
+    .filter((n) => !mine.some((x) => x.toLowerCase() === n.toLowerCase()));
+  const label = (names) => (names.length ? new RegExp(`^\\s*\\**(?:${names.map(escapeRe).join('|')})\\**\\s*:`, 'i') : null);
+  const ownLabel = label(mine);
+  const otherLabel = label(theirs);
+
+  let out = text.trim();
+  // drop leading lines written as someone else, e.g. "Ethan: im not your ethan." before the real reply
+  for (let i = 0; i < 4 && otherLabel?.test(out); i++) out = out.includes('\n') ? out.slice(out.indexOf('\n') + 1).trim() : '';
+  if (ownLabel) out = out.replace(ownLabel, '').trim();
+  if (theirs.length) {
+    const cut = out.search(new RegExp(`\\n\\s*\\**(?:${theirs.map(escapeRe).join('|')})\\**\\s*:`, 'i'));
+    if (cut > 0) out = out.slice(0, cut);
+  }
+  // an unlabelled echo of what the human just said
+  const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const human = norm(lastHumanText);
+  if (human) {
+    const paras = out.split(/\n\s*\n/);
+    const firstLine = paras[0].split('\n')[0];
+    if (norm(paras[0]) === human) out = paras.slice(1).join('\n\n');
+    else if (norm(firstLine) === human) out = out.slice(out.indexOf(firstLine) + firstLine.length);
+  }
   return out.trim();
 }
 

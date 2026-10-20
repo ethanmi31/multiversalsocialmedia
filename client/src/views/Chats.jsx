@@ -106,9 +106,13 @@ function NewConversation({ worldId, kind, chars, persona, notify, onClose, onCre
 
 const convTitle = (c) => c.title || (c.members.length ? c.members.map((m) => m.name).join(', ') : 'On your own');
 
-const stripPrefix = (text, members) => {
+/** While streaming: hide a line the model wrote as the human (it's removed on save too) and the speaker's own label. */
+const stripPrefix = (text, members, player) => {
   const m = text.match(/^\s*\**([^:\n*]{1,40})\**\s*:\s*/);
-  return m && [...members.map((x) => x.name.toLowerCase()), 'narrator'].includes(m[1].trim().toLowerCase()) ? text.slice(m[0].length) : text;
+  if (!m) return text;
+  const who = m[1].trim().toLowerCase();
+  if (player && who === player.name.toLowerCase()) return text.includes('\n') ? stripPrefix(text.slice(text.indexOf('\n') + 1), members, player) : '';
+  return [...members.map((x) => x.name.toLowerCase()), 'narrator'].includes(who) ? text.slice(m[0].length) : text;
 };
 
 function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfile, openConversation, worldId }) {
@@ -219,7 +223,7 @@ function Conversation({ id, kind, chars, notify, onChange, onDeleted, openProfil
             onDelete={async () => { await api.del(`/messages/${m.id}`); load(); }} />
         ))}
         {streaming && (streaming.text
-          ? <Message m={{ ...(streaming.speaker || {}), content: stripPrefix(streaming.text, conv.members) }} group={group} scene={scene} chars={chars} />
+          ? <Message m={{ ...(streaming.speaker || {}), content: stripPrefix(streaming.text, conv.members, player) }} group={group} scene={scene} chars={chars} />
           : <Typing label={scene ? 'Something is happening' : `${streaming.speaker?.name || 'Someone'} is typing`} />)}
         <div ref={bottom} />
       </div>
