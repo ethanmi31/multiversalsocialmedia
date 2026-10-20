@@ -14,6 +14,7 @@ import { conversationMembers, pickResponder, streamReply, observeConversation, f
 import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
 import { directorChat, directorState } from './director.js';
+import { createCommunity, findCommunity, join as joinCommunity, leave as leaveCommunity, listCommunities, trendingHashtags } from './communities.js';
 import { startFromLoreJob, startLearnJob, getFromLoreJob, resetSkim } from './canon.js';
 
 const app = express();
@@ -335,13 +336,55 @@ api.post('/characters/:id/follow', (req, res) => {
 });
 
 // ---------------------------------------------------------------- feed
-const postSelect = `SELECT p.*, c.name, c.handle, c.color, c.kind,
+const postSelect = `SELECT p.*, c.name, c.handle, c.color, c.kind, k.slug AS communitySlug, k.name AS communityName,
   (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replyCount
-  FROM posts p JOIN characters c ON c.id = p.character_id`;
+  FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id`;
 
+/** Home feed, one community's feed (?community=id), or everything with a hashtag (?tag=name, replies included). */
 api.get('/worlds/:id/posts', (req, res) => {
+  const wid = id(req.params.id);
   const before = Number(req.query.before) || Number.MAX_SAFE_INTEGER;
-  res.json(db.prepare(`${postSelect} WHERE p.world_id = ? AND p.parent_id IS NULL AND p.id < ? ORDER BY p.id DESC LIMIT 30`).all(id(req.params.id), before));
+  if (req.query.tag) {
+    const tag = String(req.query.tag).replace(/^#/, '');
+    const rows = db.prepare(`${postSelect} WHERE p.world_id = ? AND p.id < ? AND p.content LIKE ? ORDER BY p.id DESC LIMIT 60`).all(wid, before, `%#${tag}%`);
+    // LIKE is a rough cut; keep only real hashtag matches (not #tagged when looking for #tag)
+    const re = new RegExp(`#${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i');
+    return res.json(rows.filter((p) => re.test(p.content)).slice(0, 30));
+  }
+  const community = req.query.community ? findCommunity(wid, Number(req.query.community)) : null;
+  if (req.query.community && !community) throw httpError(404, 'Community not found');
+  res.json(db.prepare(`${postSelect} WHERE p.world_id = ? AND p.parent_id IS NULL AND p.id < ? AND (? IS NULL OR p.community_id = ?) ORDER BY p.id DESC LIMIT 30`)
+    .all(wid, before, community?.id ?? null, community?.id ?? null));
+});
+
+// ---------------------------------------------------------------- explore: hashtags and communities
+api.get('/worlds/:id/explore', (req, res) => {
+  const wid = id(req.params.id);
+  const persona = req.query.as ? character(req.query.as, wid) : null;
+  res.json({ hashtags: trendingHashtags(wid), communities: listCommunities(wid, persona?.id) });
+});
+api.post('/worlds/:id/communities', (req, res) => {
+  const wid = id(req.params.id);
+  const creator = req.body.personaId ? character(req.body.personaId, wid) : null;
+  res.json(createCommunity(wid, { name: req.body.name, description: req.body.description, creatorId: creator?.id ?? null }));
+});
+api.post('/communities/:id/join', (req, res) => {
+  const k = db.prepare('SELECT * FROM communities WHERE id = ?').get(id(req.params.id));
+  if (!k) throw httpError(404, 'Community not found');
+  const me = character(req.body.personaId, k.world_id);
+  if (req.body.leave) leaveCommunity(k.id, me.id);
+  else joinCommunity(k.id, me.id);
+  res.json({ ok: true });
+});
+api.put('/communities/:id', (req, res) => {
+  const k = db.prepare('SELECT * FROM communities WHERE id = ?').get(id(req.params.id));
+  if (!k) throw httpError(404, 'Community not found');
+  for (const f of ['name', 'description']) if (f in req.body) db.prepare(`UPDATE communities SET ${f} = ? WHERE id = ?`).run(String(req.body[f]), k.id);
+  res.json({ ok: true });
+});
+api.delete('/communities/:id', (req, res) => {
+  db.prepare('DELETE FROM communities WHERE id = ?').run(id(req.params.id));
+  res.json({ ok: true });
 });
 api.get('/posts/:id', (req, res) => {
   const p = db.prepare(`${postSelect} WHERE p.id = ?`).get(id(req.params.id));
@@ -357,9 +400,17 @@ api.post('/worlds/:id/posts', (req, res) => {
   const { characterId, content } = req.body;
   if (!content?.trim() || !characterId) throw httpError(400, 'Pick who is posting and write something.');
   character(characterId, wid);
-  // replies always attach to the thread root
+  // replies always attach to the thread root and live in its community
   const parent = req.body.parentId ? post(req.body.parentId, wid) : null;
-  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content) VALUES (?, ?, ?, ?)').run(wid, characterId, parent ? parent.parent_id || parent.id : null, content.trim());
+  const rootId = parent ? parent.parent_id || parent.id : null;
+  let communityId = rootId ? db.prepare('SELECT community_id FROM posts WHERE id = ?').get(rootId).community_id : null;
+  if (!rootId && req.body.communityId) {
+    const k = findCommunity(wid, Number(req.body.communityId));
+    if (!k) throw httpError(400, 'That community belongs to a different universe.');
+    communityId = k.id;
+  }
+  if (communityId) joinCommunity(communityId, Number(characterId));
+  const r = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, community_id) VALUES (?, ?, ?, ?, ?)').run(wid, characterId, rootId, content.trim(), communityId);
   res.json({ id: Number(r.lastInsertRowid) });
 });
 api.post('/posts/:id/like', (req, res) => {

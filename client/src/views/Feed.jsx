@@ -2,8 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { Avatar, AsyncButton, RichText, Typing, fmtCount, timeAgo } from '../components.jsx';
 
-export default function Feed(props) {
-  const { worldId, world, notify, refreshWorlds, goto, persona, chars, settings } = props;
+const loadView = (worldId) => {
+  try { return JSON.parse(localStorage.getItem(`feedView:${worldId}`)) || { type: 'home' }; } catch { return { type: 'home' }; }
+};
+
+export default function Feed(baseProps) {
+  const { worldId, world, notify, refreshWorlds, goto, persona, chars, settings } = baseProps;
+  const [view, setView] = useState(() => loadView(worldId)); // home | explore | community {id} | tag {tag}
+  const [explore, setExplore] = useState({ hashtags: [], communities: [] });
   const [posts, setPosts] = useState([]);
   const [trending, setTrending] = useState([]);
   const [text, setText] = useState('');
@@ -17,25 +23,39 @@ export default function Feed(props) {
   const busy = useRef(false);
   const caughtUp = useRef(false);
 
+  const loadExplore = () => api.get(`/worlds/${worldId}/explore${persona ? `?as=${persona.id}` : ''}`).then((x) => { setExplore(x); return x; });
   const load = async () => {
-    setPosts(await api.get(`/worlds/${worldId}/posts`));
+    const q = view.type === 'community' ? `?community=${view.id}` : view.type === 'tag' ? `?tag=${encodeURIComponent(view.tag)}` : '';
+    if (view.type !== 'explore') setPosts(await api.get(`/worlds/${worldId}/posts${q}`).catch(() => { setView({ type: 'home' }); return []; }));
+    loadExplore();
     const st = await api.get(`/worlds/${worldId}/state`);
     setTrending(st.storylines.filter((s) => s.status === 'active' && s.visibility !== 'private').slice(0, 5));
   };
-  useEffect(() => { load(); }, [worldId]);
+  useEffect(() => {
+    try { localStorage.setItem(`feedView:${worldId}`, JSON.stringify(view)); } catch {}
+    load();
+  }, [worldId, view.type, view.id, view.tag, persona?.id]);
+
+  const community = view.type === 'community' ? explore.communities.find((c) => c.id === view.id) : null;
+  const joined = explore.communities.filter((c) => c.joined);
+  const props = {
+    ...baseProps,
+    openTag: (tag) => { setThread(null); setView({ type: 'tag', tag }); },
+    openCommunity: (cid) => { setThread(null); setView({ type: 'community', id: cid }); }
+  };
 
   const hasAi = chars.some((c) => c.kind !== 'player' && c.active);
 
-  async function tick(label = 'The world is moving…', body = { count, topic }) {
+  async function tick(label = 'The world is moving…', body = { count, topic, communityId: community?.id }) {
     if (busy.current) return;
     busy.current = true;
     setTicking(label);
     try {
       const r = await api.post(`/worlds/${worldId}/tick`, body);
-      notify(`${r.created.length} new posts${r.dms ? ` · ${r.dms} new DM${r.dms > 1 ? 's' : ''}` : ''}`);
+      notify(`${r.created.length} new posts${r.dms ? ` · ${r.dms} new DM${r.dms > 1 ? 's' : ''}` : ''}${r.community ? ` · a new community formed: c/${r.community.slug}` : ''}`);
       await load();
       refreshWorlds();
-      props.refreshChars();
+      baseProps.refreshChars();
     } catch (e) {
       notify(e.message, 'error');
       setAuto(false);
@@ -58,7 +78,7 @@ export default function Feed(props) {
     if (!auto) return;
     const t = setInterval(() => tick('New activity…'), 120_000);
     return () => clearInterval(t);
-  }, [auto, count, topic]);
+  }, [auto, count, topic, community?.id]);
 
   async function withTyping(postId, fn) {
     setTypingOn((s) => new Set(s).add(postId));
@@ -70,7 +90,7 @@ export default function Feed(props) {
 
   async function submit() {
     if (!text.trim() || !persona) return;
-    const { id } = await api.post(`/worlds/${worldId}/posts`, { characterId: persona.id, content: text });
+    const { id } = await api.post(`/worlds/${worldId}/posts`, { characterId: persona.id, content: text, communityId: community?.id });
     setText('');
     await load();
     if (autoReply && hasAi) withTyping(id, () => api.post(`/posts/${id}/replies/generate`, {}));
@@ -78,9 +98,39 @@ export default function Feed(props) {
 
   return (
     <div className="page feed-page">
-      <header className="page-head"><h1>Feed</h1></header>
+      <header className="page-head"><h1>{community ? community.name : view.type === 'tag' ? `#${view.tag}` : view.type === 'explore' ? 'Explore' : 'Feed'}</h1></header>
 
-      {trending.length > 0 && (
+      <nav className="feed-tabs">
+        <button className={`chip ${view.type === 'home' ? 'active' : ''}`} onClick={() => setView({ type: 'home' })}>Home</button>
+        <button className={`chip ${view.type === 'explore' ? 'active' : ''}`} onClick={() => setView({ type: 'explore' })}># Explore</button>
+        {joined.map((c) => (
+          <button key={c.id} className={`chip ${view.type === 'community' && view.id === c.id ? 'active' : ''}`} onClick={() => setView({ type: 'community', id: c.id })}>c/{c.slug}</button>
+        ))}
+        {view.type === 'tag' && <button className="chip active">#{view.tag}</button>}
+        {community && !community.joined && <button className="chip active">c/{community.slug}</button>}
+      </nav>
+
+      {view.type === 'explore' && <Explore {...props} explore={explore} reload={loadExplore} />}
+
+      {community && (
+        <section className="card community-head">
+          <div className="row space wrap">
+            <div>
+              <div className="muted small">c/{community.slug} · {community.members} members · {community.posts} posts</div>
+              <p style={{ margin: '4px 0 0' }}>{community.description}</p>
+            </div>
+            {persona && (
+              <AsyncButton className={community.joined ? '' : 'primary'} notify={notify} onClick={async () => {
+                await api.post(`/communities/${community.id}/join`, { personaId: persona.id, leave: !!community.joined });
+                loadExplore();
+              }}>{community.joined ? 'Joined ✓' : 'Join'}</AsyncButton>
+            )}
+          </div>
+        </section>
+      )}
+
+      {view.type !== 'explore' && <>
+      {view.type === 'home' && trending.length > 0 && (
         <div className="trending">
           <span className="muted small">Trending</span>
           {trending.map((t) => <span key={t.id} className="trend" title={t.summary}>#{t.title.replace(/\s+/g, '')}</span>)}
@@ -94,7 +144,7 @@ export default function Feed(props) {
               <Avatar c={persona} />
               <div><b>{persona.name}</b> <span className="muted small">@{persona.handle}</span></div>
             </div>
-            <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder="What's happening?"
+            <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={community ? `Post in c/${community.slug}…` : "What's happening?"}
               onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit(); }} />
             <div className="row space">
               <label className="check small"><input type="checkbox" checked={autoReply} onChange={(e) => setAutoReply(e.target.checked)} /> People can reply</label>
@@ -108,7 +158,7 @@ export default function Feed(props) {
 
       <section className="card">
         <div className="row wrap">
-          <button className="primary" disabled={!!ticking} onClick={() => tick()}>{ticking ? 'Working…' : 'Let time pass'}</button>
+          <button className="primary" disabled={!!ticking} onClick={() => tick()}>{ticking ? 'Working…' : community ? 'Let time pass here' : 'Let time pass'}</button>
           <label className="inline small">Posts <input type="number" min={1} max={20} value={count} onChange={(e) => setCount(e.target.value)} style={{ width: 60 }} /></label>
           <input value={topic} onChange={(e) => setTopic(e.target.value)} placeholder="Optional event, e.g. 'someone leaked the group chat'" style={{ flex: 1, minWidth: 200 }} />
           <label className="check small" title="A new batch every 2 minutes while this page is open. Uses credits!">
@@ -124,15 +174,16 @@ export default function Feed(props) {
         {posts.map((p) => (
           <Post key={p.id} p={p} {...props} onOpen={() => setThread(p.id)} onChange={load} typing={typingOn.has(p.id)} />
         ))}
-        {!posts.length && <div className="empty small muted">The feed is quiet. Let some time pass or post something.</div>}
+        {!posts.length && <div className="empty small muted">{view.type === 'tag' ? `No posts with #${view.tag} yet.` : community ? 'Nothing posted here yet.' : 'The feed is quiet. Let some time pass or post something.'}</div>}
       </div>
+      </>}
 
       {thread && <Thread id={thread} {...props} onClose={() => { setThread(null); load(); }} />}
     </div>
   );
 }
 
-export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, chars, openProfile, notify }) {
+export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, chars, openProfile, openTag, openCommunity, notify }) {
   return (
     <article className={`post ${compact ? 'compact' : ''}`} onClick={onOpen} style={{ cursor: onOpen ? 'pointer' : 'default' }}>
       <div onClick={(e) => { e.stopPropagation(); openProfile(p.character_id); }} style={{ cursor: 'pointer' }}><Avatar c={p} /></div>
@@ -142,7 +193,10 @@ export function Post({ p, onOpen, onChange, onReply, compact, typing, persona, c
           <span className="muted">@{p.handle} · {timeAgo(p.created_at)}</span>
           {p.kind === 'player' && <span className="badge player">you</span>}
         </div>
-        <div className="post-text"><RichText text={p.content} chars={chars} openProfile={openProfile} /></div>
+        {p.communitySlug && !compact && openCommunity && (
+          <a className="community-chip" onClick={(e) => { e.stopPropagation(); openCommunity(p.community_id); }}>c/{p.communitySlug}</a>
+        )}
+        <div className="post-text"><RichText text={p.content} chars={chars} openProfile={openProfile} openTag={openTag} /></div>
         <div className="post-actions muted small" onClick={(e) => e.stopPropagation()}>
           {onOpen && <button className="link" onClick={onOpen}>💬 {p.replyCount || 0}</button>}
           {onReply && <button className="link" onClick={() => onReply(p)}>↩ reply</button>}
@@ -211,5 +265,51 @@ function Thread(props) {
         )}
       </div>
     </div>
+  );
+}
+
+function Explore({ worldId, persona, notify, explore, reload, openTag, openCommunity }) {
+  async function create() {
+    const name = prompt('Community name (e.g. "Snowdin", "PRIME Powered Ones"):');
+    if (!name?.trim()) return;
+    const description = prompt('What is it about? (optional)') || '';
+    const k = await api.post(`/worlds/${worldId}/communities`, { name, description, personaId: persona?.id });
+    await reload();
+    openCommunity(k.id);
+  }
+  return (
+    <>
+      <section className="card">
+        <h2>Trending hashtags</h2>
+        <div className="trending">
+          {explore.hashtags.map((h) => (
+            <button key={h.tag} className="trend clickable" onClick={() => openTag(h.tag)}>#{h.tag} <span className="muted small">{h.posts}</span></button>
+          ))}
+          {!explore.hashtags.length && <span className="muted small">No hashtags yet — they appear as people use them.</span>}
+        </div>
+      </section>
+      <section className="card">
+        <div className="row space"><h2>Communities</h2><AsyncButton notify={notify} onClick={create}>+ Create community</AsyncButton></div>
+        <p className="muted small">Groups that form as the world plays out (people from one universe, a town, a fandom…). Join one to get its tab on the feed.</p>
+        <div className="community-list">
+          {explore.communities.map((c) => (
+            <div key={c.id} className="community-row" onClick={() => openCommunity(c.id)}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <b>{c.name}</b> <span className="muted small">c/{c.slug} · {c.members} members · {c.posts} posts</span>
+                <div className="muted small ellipsis">{c.description}</div>
+              </div>
+              {persona && (
+                <AsyncButton className={c.joined ? '' : 'primary'} notify={notify} onClick={async (e) => {
+                  e.stopPropagation();
+                  await api.post(`/communities/${c.id}/join`, { personaId: persona.id, leave: !!c.joined });
+                  reload();
+                }}>{c.joined ? 'Joined ✓' : 'Join'}</AsyncButton>
+              )}
+            </div>
+          ))}
+          {!explore.communities.length && <div className="muted small">No communities yet. They start forming once there's enough going on — or create one.</div>}
+        </div>
+      </section>
+    </>
   );
 }

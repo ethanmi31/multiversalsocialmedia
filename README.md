@@ -42,6 +42,10 @@ All data is stored locally in `data/multiverse.db` (SQLite). Set `DATA_DIR` to c
    - Coming back after a while (30 minutes by default) runs a "while you were away" tick.
    - Replying to a post gets answers aimed at you.
    - Opening a thread sometimes has people already typing.
+   - **Hashtags and communities:** characters use #hashtags naturally, and **# Explore** shows trending tags and all communities. Click a tag to see every post with it.
+     - Communities (e.g. "Snowdin", a group for one universe) form on their own as topics come up, or you can create one, or ask the Director.
+     - Join one to get its tab on the feed, where you can post and **Let time pass here** so its members talk inside it.
+     - Replies stay in their thread's community.
 6. **Notifications:** replies, @mentions, follows, likes, DMs and trending drama.
 7. **Messages:** DMs and group chats with real-time streaming and texting style (several short messages in a row). Characters can also DM you first.
 8. **Real Life:** in-person scenes outside the app, on your own or with characters, such as *"I drive to his house and cuss him out"* or *"I go pick up the package she asked for"*. People can join a scene partway through.

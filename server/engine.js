@@ -1,5 +1,6 @@
 import { db, getSettings } from './db.js';
 import { activateLore } from './lorebook.js';
+import { communitiesBlock, createCommunity, findCommunity, join as joinCommunity, memberIds, announceCommunity } from './communities.js';
 import { completeJSON, httpError } from './openrouter.js';
 import {
   applyUpdates, notifyForPost, personas, resolver, simulateEngagement, worldContext, followerCount, UPDATES_SCHEMA, UPDATES_RULES
@@ -255,13 +256,14 @@ function findLoose(haystack, needle = '') {
 // World tick: the world moves on. One batched request for posts, replies, DMs, follows and drama.
 // ---------------------------------------------------------------------------
 
-function recentFeed(worldId) {
+function recentFeed(worldId, communityId = null) {
   const roots = db
     .prepare(
-      `SELECT p.id, p.content, p.likes, c.handle, c.kind, (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replies
-       FROM posts p JOIN characters c ON c.id = p.character_id WHERE p.world_id = ? AND p.parent_id IS NULL ORDER BY p.id DESC LIMIT 14`
+      `SELECT p.id, p.content, p.likes, c.handle, c.kind, k.slug AS community, (SELECT COUNT(*) FROM posts r WHERE r.parent_id = p.id) AS replies
+       FROM posts p JOIN characters c ON c.id = p.character_id LEFT JOIN communities k ON k.id = p.community_id
+       WHERE p.world_id = ? AND p.parent_id IS NULL AND (? IS NULL OR p.community_id = ?) ORDER BY p.id DESC LIMIT 14`
     )
-    .all(worldId)
+    .all(worldId, communityId, communityId)
     .reverse();
   const replies = db
     .prepare(
@@ -310,22 +312,36 @@ function rootOf(worldId, id) {
 
 const humanTag = (p) => `@${p.handle}${p.kind === 'player' ? ' (HUMAN)' : ''}`;
 
-export async function worldTick(worldId, { count = 5, topic = '', allowDm } = {}) {
+export async function worldTick(worldId, { count = 5, topic = '', allowDm, communityId = null } = {}) {
   const s = getSettings();
   const world = getWorld(worldId);
   count = Math.max(1, Math.min(20, Number(count) || 5));
   const pool = aiCharacters(worldId);
   if (!pool.length) throw httpError(400, 'No active AI characters in this world. Create or generate some first.');
-  const actors = pickActors(worldId, pool, Math.min(pool.length, Math.max(4, count + 2)));
+  const focus = communityId ? findCommunity(worldId, Number(communityId)) : null;
+  if (communityId && !focus) throw httpError(404, 'Community not found in this universe');
+  let actors = pickActors(worldId, pool, Math.min(pool.length, Math.max(4, count + 2)));
+  if (focus) {
+    // inside a community, mostly its members talk (plus a newcomer or two)
+    const members = new Set(memberIds(focus.id));
+    const inside = sample(pool.filter((c) => members.has(c.id)), Math.max(3, count));
+    actors = [...inside, ...actors.filter((a) => !members.has(a.id)).slice(0, 2)];
+  }
+  const postCount = db.prepare('SELECT COUNT(*) AS n FROM posts WHERE world_id = ?').get(worldId).n;
+  const communityCount = db.prepare('SELECT COUNT(*) AS n FROM communities WHERE world_id = ?').get(worldId).n;
+  // groups form once there's enough going on to form around, and rarely
+  const newCommunityAllowed = !focus && postCount >= 12 && communityCount < 40 && Math.random() < 0.18;
+  const communities = communitiesBlock(worldId, focus?.id);
   const ps = personas(worldId);
   const dmsAllowed = ps.length > 0 && (allowDm ?? Math.random() < s.dmChance);
   const newUserAllowed = Math.random() < 0.15; // now and then someone new joins the platform
-  const { roots, replies } = recentFeed(worldId);
+  const { roots, replies } = recentFeed(worldId, focus?.id ?? null);
 
   const state = worldContext(worldId, { focus: actors, others: ps, memoriesPer: 3 });
   const lore = activateLore(worldId, [topic, state, ...actors.flatMap(knownNames), ...roots.slice(-6).map((p) => p.content)].join('\n'));
 
-  const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null}],
+  const schema = `{"posts":[{"handle":string,"content":string,"replyTo":number|null,"community":slug|null}],
+${newCommunityAllowed ? '"newCommunity":{"name":string,"description":string,"creator":handle,"members":[handles]}|null,\n' : ''}
 ${dmsAllowed ? '"dms":[{"from":handle,"to":persona handle,"content":string}],\n' : ''}${newUserAllowed ? '"newUsers":[{"name":string,"handle":string,"realName":string,"bio":string,"description":string,"followers":number}],\n' : ''}"follows":[{"from":handle,"to":handle}],"unfollows":[{"from":handle,"to":handle}],
 "likes":[{"handle":string,"postId":number}],
 ${UPDATES_SCHEMA}}`;
@@ -340,6 +356,8 @@ ${UPDATES_SCHEMA}}`;
         content: `${worldPreamble(world)}
 You advance the social network of this universe by one step of time. Show the fallout of earlier drama, continue storylines, start new ones occasionally (including platform-wide events), and react to what the human posted. Posts can be new, or replies to existing posts (replyTo = a post id from the feed). Write arguments as several separate replies from different accounts. NPCs may leak screenshots of DMs or group chats in posts.
 ${dmsAllowed ? '"dms": optionally 0-2 private messages from NPCs to the human\'s personas, only when motivated (drama, relationships, something the human did, flirting, threats, gossip).' : ''}
+Use #hashtags naturally now and then (topics, events, fandoms, places) — not on every post. ${focus ? `This round happens INSIDE the community c/${focus.slug} ("${focus.name}"): most posts have "community":"${focus.slug}" and fit its topic.` : '"community": the slug if the post is made inside one of the existing communities (only by people who would be in it), else null.'}
+${newCommunityAllowed ? '"newCommunity": optionally (only if a group would naturally form around a recurring topic, place, universe or fandom in what people are posting — e.g. people from one universe, a town, a fandom) one new community, founded by an NPC, with the NPCs who would join. Its first posts can be in this same response. Usually null.' : ''}
 ${newUserAllowed ? `"newUsers": optionally 0-1 brand-new account joining the platform because of current events (a new user may also post in this same response using their handle).\n${ACCOUNT_FIELDS}` : ''}
 "follows"/"unfollows"/"likes": realistic social reactions (people unfollow after drama, follow after viral posts, like posts they agree with).
 ${UPDATES_RULES}
@@ -353,7 +371,8 @@ Return ONLY JSON: ${schema}`
           `NPCs WHO MAY ACT NOW:\n${actors.map((a) => characterCard(a, { brief: true })).join('\n\n')}`,
           personaBlock(ps),
           newUserAllowed && npcRules(world),
-          roots.length && `RECENT FEED:\n${roots.map((p) => `#${p.id} ${humanTag(p)} [${p.likes} likes, ${p.replies} replies]: ${clip(p.content, 220)}`).join('\n')}`,
+          communities,
+          roots.length && `RECENT ${focus ? `POSTS IN c/${focus.slug}` : 'FEED'}:\n${roots.map((p) => `#${p.id} ${humanTag(p)}${p.community && !focus ? ` in c/${p.community}` : ''} [${p.likes} likes, ${p.replies} replies]: ${clip(p.content, 220)}`).join('\n')}`,
           replies.length && `RECENT REPLIES:\n${replies.map((r) => `#${r.id} (on #${r.parent_id}) ${humanTag(r)}: ${clip(r.content, 160)}`).join('\n')}`,
           `Write ${count} posts/replies now.${topic ? ` Current event/topic: ${topic}` : ''}`
         ])
@@ -375,13 +394,25 @@ Return ONLY JSON: ${schema}`
   }
   const resolve = resolver(worldId);
   const find = (h) => aliases.get(makeHandle(String(h ?? ''))) || resolve(h);
-  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes) VALUES (?, ?, ?, ?, ?)');
+  let founded = null;
+  const nc = newCommunityAllowed && out.newCommunity;
+  if (nc?.name && find(nc.creator) && allowed.has(find(nc.creator).id) && !findCommunity(worldId, nc.name)) {
+    const members = arr(nc.members).map(find).filter((c) => c && allowed.has(c.id)).map((c) => c.id);
+    founded = createCommunity(worldId, { name: nc.name, description: nc.description, creatorId: find(nc.creator).id, memberIds: members });
+    announceCommunity(worldId, founded);
+  }
+  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes, community_id) VALUES (?, ?, ?, ?, ?, ?)');
   const created = [];
   for (const p of arr(out.posts).slice(0, count)) {
     const author = find(p?.handle);
     if (!author || !allowed.has(author.id) || !p.content) continue; // never as a persona
     const parent = rootOf(worldId, p.replyTo);
-    const id = Number(ins.run(worldId, author.id, parent, String(p.content).trim(), parent ? 0 : Math.floor(Math.random() * 20)).lastInsertRowid);
+    // replies live where their thread is; new posts go where the model put them (or the community in focus)
+    const where = parent
+      ? db.prepare('SELECT community_id FROM posts WHERE id = ?').get(parent).community_id
+      : (p.community ? findCommunity(worldId, p.community)?.id : null) ?? focus?.id ?? null;
+    if (where) joinCommunity(where, author.id);
+    const id = Number(ins.run(worldId, author.id, parent, String(p.content).trim(), parent ? 0 : Math.floor(Math.random() * 20), where).lastInsertRowid);
     notifyForPost(worldId, id);
     created.push(id);
   }
@@ -402,7 +433,7 @@ Return ONLY JSON: ${schema}`
   coolDownStorylines(worldId, tickStart);
   simulateEngagement(worldId);
   db.prepare('UPDATE worlds SET last_tick_at = CURRENT_TIMESTAMP WHERE id = ?').run(worldId);
-  return { created, dms };
+  return { created, dms, community: founded };
 }
 
 /** Drama nobody touched this tick cools off, and fizzles out entirely once it's cold, so old plots don't linger forever. */
@@ -501,12 +532,13 @@ Return ONLY JSON: {"replies":[{"handle":string,"content":string}],"likes":[{"han
 
   const find = resolver(world.id);
   const allowed = new Set(responders.map((r) => r.id));
-  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes) VALUES (?, ?, ?, ?, ?)');
+  const ins = db.prepare('INSERT INTO posts (world_id, character_id, parent_id, content, likes, community_id) VALUES (?, ?, ?, ?, ?, ?)');
   const created = [];
   for (const r of arr(out.replies).slice(0, count + 2)) {
     const c = find(r?.handle);
     if (!c || !allowed.has(c.id) || !r.content) continue;
-    const id = Number(ins.run(world.id, c.id, root.id, String(r.content).trim(), Math.floor(Math.random() ** 2 * 60)).lastInsertRowid);
+    if (root.community_id) joinCommunity(root.community_id, c.id);
+    const id = Number(ins.run(world.id, c.id, root.id, String(r.content).trim(), Math.floor(Math.random() ** 2 * 60), root.community_id ?? null).lastInsertRowid);
     notifyForPost(world.id, id);
     created.push(id);
   }

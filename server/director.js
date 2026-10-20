@@ -3,6 +3,7 @@ import { completeJSON, httpError } from './openrouter.js';
 import { getWorld, worldPreamble, knownNames, clip, escapeRe } from './engine.js';
 import { applyUpdates, resolver, ago } from './worldstate.js';
 import { addFromLore } from './canon.js';
+import { createCommunity } from './communities.js';
 
 // The Director is the author's out-of-character channel to the engine for ONE universe.
 // It answers questions about what the engine is tracking, records standing corrections ("notes")
@@ -72,6 +73,7 @@ You can change things with "actions":
 - {"type":"add_memory","handle":string,"memory":string} — e.g. to record where someone is now
 - {"type":"set_relationship","from":handle,"to":handle,"status":string,"score":-100..100} / {"type":"remove_relationship","from":handle,"to":handle}
 - {"type":"set_active","handle":string,"active":boolean} — take an account off the platform or bring it back
+- {"type":"add_community","name":string,"description":string,"members":[handles]} — create a community (group) on the platform
 - {"type":"add_characters_from_lore","request":string} — create accounts for characters from this universe's lorebook/stories, e.g. "5 characters from the stories", "all the characters", "the villains". Pass the author's wording.
 
 Guidelines:
@@ -193,6 +195,13 @@ async function applyActions(worldId, actions) {
           if (!f || !t) break;
           db.prepare('DELETE FROM relationships WHERE world_id = ? AND from_id = ? AND to_id = ?').run(worldId, f.id, t.id);
           done.push(`Cleared how @${f.handle} feels about @${t.handle}`);
+          break;
+        }
+        case 'add_community': {
+          if (!a.name) break;
+          const members = (Array.isArray(a.members) ? a.members : []).map(find).filter((c) => c && c.kind !== 'player').map((c) => c.id);
+          const k = createCommunity(worldId, { name: a.name, description: a.description || '', memberIds: members });
+          done.push(`Created community c/${k.slug} (${members.length} members)`);
           break;
         }
         case 'add_characters_from_lore': {

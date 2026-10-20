@@ -181,6 +181,22 @@ CREATE TABLE IF NOT EXISTS director_notes (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Communities: groups inside a universe's platform (e.g. "Snowdin", a universe-only group)
+CREATE TABLE IF NOT EXISTS communities (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  world_id INTEGER NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  creator_id INTEGER REFERENCES characters(id) ON DELETE SET NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS community_members (
+  community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+  character_id INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+  PRIMARY KEY (community_id, character_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_memories_char ON memories(character_id);
 CREATE INDEX IF NOT EXISTS idx_story_world ON storylines(world_id, status);
 CREATE INDEX IF NOT EXISTS idx_notif_world ON notifications(world_id, read);
@@ -202,7 +218,8 @@ addColumn('worlds', 'npc_instructions', "TEXT DEFAULT ''"); // how random users 
 addColumn('storylines', 'visibility', "TEXT DEFAULT 'public'"); // private = only the people involved know
 addColumn('characters', 'real_name', "TEXT DEFAULT ''");
 addColumn('characters', 'lore_entry_id', 'INTEGER');
-addColumn('characters', 'knowledge', "TEXT DEFAULT ''");             // what they know from the lore: their universe, people, events (always included)          // the lorebook entry this character was created from
+addColumn('characters', 'knowledge', "TEXT DEFAULT ''");
+addColumn('posts', 'community_id', 'INTEGER REFERENCES communities(id) ON DELETE CASCADE'); // posted inside a community (replies inherit the thread's)             // what they know from the lore: their universe, people, events (always included)          // the lorebook entry this character was created from
 addColumn('lore_entries', 'is_character', 'INTEGER');         // NULL = not skimmed yet, 1 = describes a character, 0 = doesn't
 addColumn('lore_entries', 'character_name', "TEXT DEFAULT ''"); // who they really are; `name` is the display name on their profile
 
