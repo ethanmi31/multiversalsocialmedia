@@ -14,7 +14,7 @@ import { conversationMembers, pickResponder, streamReply, observeConversation, f
 import { follow, like, followerCount } from './worldstate.js';
 import { listModels, httpError } from './openrouter.js';
 import { directorChat, directorState } from './director.js';
-import { previewFromLore, resetSkim } from './canon.js';
+import { startFromLoreJob, getFromLoreJob, resetSkim } from './canon.js';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -280,9 +280,14 @@ api.post('/worlds/:id/characters/split', async (req, res) => {
   res.json(req.body.mode === 'ai' ? await splitCharactersAI(id(req.params.id), text) : splitCharactersFree(text));
 });
 /** Characters from the lorebook: skim entries, pick per the request, preview accounts (nothing created yet). */
-api.post('/worlds/:id/characters/from-lore', async (req, res) => {
+api.post('/worlds/:id/characters/from-lore', (req, res) => {
   if (req.body.rescan) resetSkim(id(req.params.id));
-  res.json(await previewFromLore(id(req.params.id), req.body.request));
+  res.json(startFromLoreJob(id(req.params.id), req.body.request));
+});
+api.get('/worlds/:id/characters/from-lore/:job', (req, res) => {
+  const job = getFromLoreJob(req.params.job);
+  if (!job || job.worldId !== id(req.params.id)) throw httpError(404, 'Job not found');
+  res.json(job);
 });
 /** Step 2: create the reviewed characters. */
 api.post('/worlds/:id/characters/import', (req, res) => {

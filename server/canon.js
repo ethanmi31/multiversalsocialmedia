@@ -11,7 +11,7 @@ const CHARACTER_CATEGORY = /\b(characters?|people|persons?|npcs?|cast|individual
 const OTHER_CATEGORY = /\b(locations?|places?|items?|objects?|factions?|organi[sz]ations?|groups?|events?|history|timeline|rules?|concepts?|lore|magic|systems?|species|races?|world)\b/i;
 
 /** Classifies every not-yet-skimmed entry of this universe. Returns how many entries needed the AI. */
-async function skim(worldId) {
+async function skim(worldId, job = {}) {
   const pending = db.prepare('SELECT id, title, category, content FROM lore_entries WHERE world_id = ? AND is_character IS NULL').all(worldId);
   const mark = db.prepare('UPDATE lore_entries SET is_character = ?, character_name = ? WHERE id = ?');
 
@@ -26,34 +26,42 @@ async function skim(worldId) {
   });
   if (!unknown.length) return 0;
 
+  // small batches answer fast and fail cheaply; a failed batch stays unskimmed and is retried next time
   const batches = [];
-  for (let i = 0; i < unknown.length; i += 120) batches.push(unknown.slice(i, i + 120));
+  for (let i = 0; i < unknown.length; i += 50) batches.push(unknown.slice(i, i + 50));
+  Object.assign(job, { phase: 'skimming', done: 0, total: batches.length });
   let next = 0;
   const worker = async () => {
     while (next < batches.length) {
-      const batch = batches[next++];
-      const out = await completeJSON({
-        task: 'skim-characters',
-        expect: 'characters',
-        maxTokens: 60 * batch.length + 300,
-        temperature: 0,
-        messages: [
-          {
-            role: 'system',
-            content: `You skim lorebook entries. Decide which entries are mainly about ONE specific individual character (a person or being who could have a social-media account), as opposed to places, groups, items, events, species or concepts.
+      const index = next++;
+      const batch = batches[index];
+      try {
+        const out = await completeJSON({
+          task: 'skim-characters',
+          expect: 'characters',
+          maxTokens: 40 * batch.length + 300,
+          temperature: 0,
+          messages: [
+            {
+              role: 'system',
+              content: `You skim lorebook entries. Decide which entries are mainly about ONE specific individual character (a person or being who could have a social-media account), as opposed to places, groups, items, events, species or concepts.
 For each character entry, give its id and the character's name as the lore names them (include a variant/universe label if the entry is about a specific variant).
 Return ONLY JSON: {"characters":[{"id":number,"name":string}]} — entries you leave out are treated as not characters.`
-          },
-          { role: 'user', content: batch.map((e) => `#${e.id} ${e.title}${e.category ? ` [${e.category}]` : ''}: ${clip(e.content.replace(/\s+/g, ' '), 160)}`).join('\n') }
-        ]
-      });
-      const found = new Map(out.characters.filter((c) => c && Number(c.id)).map((c) => [Number(c.id), String(c.name || '').trim()]));
-      tx(() => {
-        for (const e of batch) mark.run(found.has(e.id) ? 1 : 0, found.get(e.id) || '', e.id);
-      });
+            },
+            { role: 'user', content: batch.map((e) => `#${e.id} ${e.title}${e.category ? ` [${e.category}]` : ''}: ${clip(e.content.replace(/\s+/g, ' '), 160)}`).join('\n') }
+          ]
+        });
+        const found = new Map(out.characters.filter((c) => c && Number(c.id)).map((c) => [Number(c.id), String(c.name || '').trim()]));
+        tx(() => {
+          for (const e of batch) mark.run(found.has(e.id) ? 1 : 0, found.get(e.id) || '', e.id);
+        });
+      } catch (e) {
+        job.errors?.push(`Skim batch ${index + 1}: ${e.message}`);
+      }
+      job.done = (job.done || 0) + 1;
     }
   };
-  await Promise.all([worker(), worker(), worker()]);
+  await Promise.all([worker(), worker(), worker(), worker()]);
   return unknown.length;
 }
 
@@ -95,10 +103,11 @@ Return ONLY JSON: {"ids":[numbers]}`
 }
 
 /** Writes account details for the chosen characters, 10 at a time. Descriptions are the lore entries themselves. */
-async function draftAccounts(worldId, entries) {
+async function draftAccounts(worldId, entries, job = {}) {
   const world = getWorld(worldId);
   const rules = npcRules(world);
   const results = [];
+  Object.assign(job, { phase: 'drafting', done: 0, total: entries.length });
   for (let i = 0; i < entries.length; i += 10) {
     const batch = entries.slice(i, i + 10);
     let drafted = new Map();
@@ -123,6 +132,7 @@ Return ONLY JSON: {"characters":[{"id":number,"name":string,"handle":string,"rea
       drafted = new Map(out.characters.filter((c) => c && Number(c.id)).map((c) => [Number(c.id), c]));
     } catch (e) {
       console.error('drafting accounts failed, using plain names:', e.message);
+      job.errors?.push(`Writing accounts: ${e.message} (used their plain names instead)`);
     }
     for (const e of batch) {
       const d = drafted.get(e.id) || {};
@@ -136,21 +146,41 @@ Return ONLY JSON: {"characters":[{"id":number,"name":string,"handle":string,"rea
         description: e.content
       });
     }
+    job.done = results.length;
   }
   return results;
 }
 
-/** Returns account previews for the request (nothing is created yet). */
-export async function previewFromLore(worldId, request) {
+/** Returns account previews for the request (nothing is created yet). `job` receives progress. */
+export async function previewFromLore(worldId, request, job = {}) {
   if (!db.prepare('SELECT 1 FROM lore_entries WHERE world_id = ?').get(worldId)) {
     throw httpError(400, 'This universe has no lorebook entries yet. Import a lorebook first.');
   }
-  const skimmed = await skim(worldId);
+  const skimmed = await skim(worldId, job);
   const pool = candidates(worldId);
   const total = db.prepare('SELECT COUNT(*) AS n FROM lore_entries WHERE world_id = ? AND is_character = 1').get(worldId).n;
-  if (!pool.length) return { previews: [], skimmed, totalCharacters: total, available: 0 };
+  const unskimmed = db.prepare('SELECT COUNT(*) AS n FROM lore_entries WHERE world_id = ? AND is_character IS NULL').get(worldId).n;
+  if (!pool.length) return { previews: [], skimmed, unskimmed, totalCharacters: total, available: 0 };
+  Object.assign(job, { phase: 'picking', done: 0, total: 1 });
   const chosen = await pick(worldId, request, pool);
-  return { previews: await draftAccounts(worldId, chosen), skimmed, totalCharacters: total, available: pool.length };
+  return { previews: await draftAccounts(worldId, chosen, job), skimmed, unskimmed, totalCharacters: total, available: pool.length };
+}
+
+// Background jobs, so a big lorebook shows progress instead of one long silent request.
+const jobs = new Map();
+let jobSeq = 0;
+
+export function startFromLoreJob(worldId, request) {
+  const job = { id: ++jobSeq, worldId, status: 'running', phase: 'starting', done: 0, total: 0, errors: [], result: null };
+  jobs.set(job.id, job);
+  previewFromLore(worldId, request, job)
+    .then((result) => Object.assign(job, { status: 'done', result }))
+    .catch((e) => Object.assign(job, { status: 'error', errors: [...job.errors, e.message] }));
+  return job;
+}
+
+export function getFromLoreJob(id) {
+  return jobs.get(Number(id)) || null;
 }
 
 /** Used by the Director: preview and create in one go. */

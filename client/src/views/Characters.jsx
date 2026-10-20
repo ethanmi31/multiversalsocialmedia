@@ -37,6 +37,26 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
   const [importing, setImporting] = useState(false);
   const [loreRequest, setLoreRequest] = useState('');
   const [lorePreview, setLorePreview] = useState(null);
+  const [loreJob, setLoreJob] = useState(null);
+
+  async function findFromLore() {
+    let job = await api.post(`/worlds/${worldId}/characters/from-lore`, { request: loreRequest });
+    setLoreJob(job);
+    while (job.status === 'running') {
+      await new Promise((r) => setTimeout(r, 1200));
+      job = await api.get(`/worlds/${worldId}/characters/from-lore/${job.id}`);
+      setLoreJob(job);
+    }
+    setLoreJob(null);
+    if (job.status === 'error') throw new Error(job.errors[job.errors.length - 1] || 'Something went wrong');
+    const r = job.result;
+    if (job.errors.length) notify(`Finished with problems: ${job.errors.slice(0, 2).join(' · ')}${r.unskimmed ? ` — ${r.unskimmed} entries couldn't be checked yet; run it again to retry them.` : ''}`, 'error');
+    if (!r.previews.length) {
+      if (!job.errors.length) notify(r.totalCharacters ? `All ${r.totalCharacters} characters in the lorebook are already on the platform.` : 'No characters found in the lorebook.');
+      return;
+    }
+    setLorePreview(r);
+  }
   const [genCount, setGenCount] = useState(5);
   const [genTheme, setGenTheme] = useState('');
   const [filter, setFilter] = useState('all');
@@ -81,15 +101,17 @@ export default function Characters({ worldId, world, notify, refreshWorlds, refr
           <input value={loreRequest} onChange={(e) => setLoreRequest(e.target.value)} style={{ flex: 1, minWidth: 260 }}
             placeholder="e.g. add 5 characters from the stories · add all the characters · add the villains"
             onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.nextSibling?.click(); }} />
-          <AsyncButton className="primary" notify={notify} busyLabel="Skimming lorebook…" onClick={async () => {
-            const r = await api.post(`/worlds/${worldId}/characters/from-lore`, { request: loreRequest });
-            if (!r.previews.length) {
-              notify(r.totalCharacters ? `All ${r.totalCharacters} characters in the lorebook are already on the platform.` : 'No characters found in the lorebook.');
-              return;
-            }
-            setLorePreview(r);
-          }}>Find characters</AsyncButton>
+          <AsyncButton className="primary" notify={notify} busyLabel="Working…" onClick={findFromLore}>Find characters</AsyncButton>
         </div>
+        {loreJob && (
+          <div className="progress-wrap">
+            <div className="progress"><div style={{ width: `${loreJob.total ? Math.max(4, (loreJob.done / loreJob.total) * 100) : 4}%` }} /></div>
+            <div className="small muted">
+              {{ starting: 'Starting…', skimming: `Skimming the lorebook for characters… batch ${loreJob.done} / ${loreJob.total}`, picking: 'Picking the characters you asked for…', drafting: `Writing their accounts… ${loreJob.done} / ${loreJob.total}` }[loreJob.phase]}
+              {loreJob.errors.length > 0 && <span className="error-text"> · {loreJob.errors.length} problem(s), continuing</span>}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="card">

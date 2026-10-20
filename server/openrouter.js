@@ -33,12 +33,21 @@ function logUsage(task, model, usage) {
   );
 }
 
-async function post(body, apiKey) {
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: headers(apiKey),
-    body: JSON.stringify({ ...body, usage: { include: true } })
-  });
+const REQUEST_TIMEOUT_MS = Number(process.env.OPENROUTER_TIMEOUT_MS) || 180_000;
+
+/** timeoutMs covers the whole request including the body; streams pass none (they can legitimately run long). */
+async function post(body, apiKey, timeoutMs) {
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: headers(apiKey),
+      body: JSON.stringify({ ...body, usage: { include: true } }),
+      signal: timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined
+    });
+  } catch (e) {
+    throw e.name === 'TimeoutError' ? timeoutError(body.model) : e;
+  }
   if (!res.ok) {
     const text = await res.text();
     let msg = text;
@@ -64,17 +73,31 @@ async function request({ task, model, messages, maxTokens, temperature, json = f
     temperature: temperature ?? 0.7
   };
   if (json) body.response_format = { type: 'json_object' };
-  let data = await (await post(body, s.apiKey)).json();
+  let data = await postJSON(body, s.apiKey);
   logUsage(task, data.model || model, data.usage);
   let text = messageText(data);
   if (!text) {
     // "Thinking" models can spend the whole token allowance reasoning and return no answer: retry once with room to spare.
-    data = await (await post({ ...body, max_tokens: Math.max(4000, body.max_tokens * 4) }, s.apiKey)).json();
+    data = await postJSON({ ...body, max_tokens: Math.max(4000, body.max_tokens * 4) }, s.apiKey);
     logUsage(task, data.model || model, data.usage);
     text = messageText(data);
   }
   if (!text) throw emptyError(data.model || model, data.choices?.[0]?.finish_reason);
   return { text, finish: data.choices?.[0]?.finish_reason, model: data.model || model };
+}
+
+function timeoutError(model) {
+  return httpError(504, `${model} took longer than ${REQUEST_TIMEOUT_MS / 1000}s to answer, so the request was stopped. The model or provider may be overloaded — try again or pick a faster model in Settings.`);
+}
+
+/** Non-streaming call with a timeout on both the request and reading the answer. */
+async function postJSON(body, apiKey) {
+  const res = await post(body, apiKey, REQUEST_TIMEOUT_MS);
+  try {
+    return await res.json();
+  } catch (e) {
+    throw e.name === 'TimeoutError' || e.name === 'AbortError' ? timeoutError(body.model) : e;
+  }
 }
 
 function messageText(data) {
